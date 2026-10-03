@@ -20,6 +20,9 @@ API from your shell.
 * **`ds models`**, **`ds sessions`**, **`ds config`**, **`ds change-api-key`** — inspect the
   models, the stored conversations and the resolved configuration, and manage the API key.
 
+> **Unofficial project.** This plugin is not affiliated with, endorsed by or sponsored by
+> DeepSeek. See the [disclaimer](#disclaimer).
+
 ## Install
 
 ```nu
@@ -96,8 +99,9 @@ first:
 | write | `write_file` | yes |
 | command | `run_nu` | yes |
 
-When a call does need confirming it is shown first, with the resolved path (or the command)
-and a preview of what will happen, and waits for a key:
+When a call does need confirming it is shown first, led by a one-line risk warning (read,
+write or command), then the resolved path (or the command) and a preview of what will
+happen, and waits for a key:
 
 | Key | Action |
 | --- | --- |
@@ -404,6 +408,17 @@ Environment variables: `DEEPSEEK_API_KEY` (optional if a key is stored),
   prints a masked version. Use `ds change-api-key` to store or remove it.
 * Conversations are plain JSON files under `<config>/sessions/`; they are written through a
   temporary file and renamed, so an interrupted write cannot lose one.
+
+## Disclaimer
+
+This is an **unofficial**, community project. It is not affiliated with, authorised,
+endorsed or sponsored by DeepSeek, and it is not an official DeepSeek product. "DeepSeek"
+and any related names and logos are trademarks of their respective owners; they are used
+here only to say which API the plugin talks to.
+
+The plugin is provided **"as is"**, without warranty of any kind. You are responsible for
+your API usage and for the commands the model asks to run — always read a tool call before
+you approve it.
 
 ## Development
 

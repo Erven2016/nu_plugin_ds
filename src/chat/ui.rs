@@ -870,7 +870,28 @@ fn tool_call_lines(preview: &tools::Preview) -> Vec<Line<'static>> {
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
 
+    // Lead with how much the call could change, so the risk is impossible to miss before
+    // the key is pressed.
+    let (warning, warning_style) = match preview.risk {
+        tools::Risk::Read => (
+            "Reads a file — its contents are sent to DeepSeek.",
+            Style::default().fg(Color::Gray),
+        ),
+        tools::Risk::Write => (
+            "Writes to your disk — an existing file is replaced.",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        tools::Risk::Command => (
+            "Runs a command with your privileges — there is no denylist. Read it carefully.",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+    };
+
     let mut lines = vec![
+        Line::from(Span::styled(warning, warning_style)),
+        Line::default(),
         Line::from(vec![
             Span::styled(preview.tool.clone(), name),
             Span::styled(
@@ -1557,5 +1578,26 @@ mod tests {
 
         assert!(screen.contains("Quit the chat?"), "{screen}");
         assert!(screen.contains("Esc/n cancel"), "{screen}");
+    }
+
+    #[test]
+    fn the_tool_confirmation_leads_with_the_risk() {
+        let (_dir, mut app) = app(transcript());
+        app.overlay = Some(Overlay::ToolCall {
+            index: 1,
+            total: 1,
+            preview: tools::Preview {
+                tool: "run_nu".to_owned(),
+                path: std::path::PathBuf::from("."),
+                summary: "runs in . (up to 120s)".to_owned(),
+                lines: vec!["echo hi".to_owned()],
+                hidden: 0,
+                risk: tools::Risk::Command,
+            },
+        });
+        let screen = text(&snapshot(&mut app, 90, 30));
+
+        assert!(screen.contains("no denylist"), "{screen}");
+        assert!(screen.contains("run_nu"), "{screen}");
     }
 }
