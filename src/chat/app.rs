@@ -674,8 +674,11 @@ impl ChatApp {
                     self.input.clear();
                 }
             }
-            // Alt/Shift/Control+Enter inserts a newline instead of sending.
-            KeyCode::Enter if alt || shift => self.input.insert_char('\n'),
+            // Shift+Enter inserts a newline instead of sending.
+            KeyCode::Enter if shift => self.input.insert_char('\n'),
+            // Alt+Enter is deliberately left unbound (some terminals use it for fullscreen),
+            // and must not fall through to sending the prompt.
+            KeyCode::Enter if alt => {}
             KeyCode::Enter => {
                 let text = self.input.take();
                 self.submit(text);
@@ -2171,6 +2174,37 @@ mod tests {
         assert!(
             app.store.load(&deleted_id).is_err(),
             "a later save brought the deleted session back"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn alt_enter_neither_sends_nor_edits() {
+        let dir = temp_dir("alt-enter");
+        let session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let mut app = test_app(&dir, session);
+        app.input.set_text("hello");
+
+        let before = app.session.messages.len();
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+
+        assert_eq!(
+            app.session.messages.len(),
+            before,
+            "Alt+Enter must not send the prompt"
+        );
+        assert_eq!(
+            app.input.text(),
+            "hello",
+            "Alt+Enter must not edit the prompt"
+        );
+
+        // Shift+Enter still inserts a newline.
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert!(
+            app.input.text().contains('\n'),
+            "Shift+Enter should insert a newline"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

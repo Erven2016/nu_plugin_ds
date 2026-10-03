@@ -39,7 +39,7 @@ history is compacted automatically when it grows past `context_limit * compact_r
 tokens. Sessions are stored as JSON files under the plugin's config directory, and they
 can be reopened with Ctrl+B or `--session`.
 
-Keys: Enter sends, Alt+Enter inserts a newline, Ctrl+O switches model, Ctrl+T switches
+Keys: Enter sends, Shift+Enter inserts a newline, Ctrl+O switches model, Ctrl+T switches
 the thinking level, Ctrl+B browses sessions, Ctrl+N starts a new session, Ctrl+R redoes
 the last answer, Ctrl+C cancels or quits, Ctrl+X quits and Ctrl+/ shows the help card.
 Type /help inside the chat for the full list.

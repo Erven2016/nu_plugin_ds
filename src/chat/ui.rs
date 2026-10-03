@@ -950,7 +950,7 @@ fn help_lines(app: &ChatApp) -> Vec<Line<'static>> {
 
     let mut lines = vec![
         entry("Enter", "send the prompt", key, description),
-        entry("Alt+Enter", "insert a newline", key, description),
+        entry("Shift+Enter", "insert a newline", key, description),
         entry("Ctrl+O", "switch model", key, description),
         entry("Ctrl+T", "switch thinking level", key, description),
         entry("Ctrl+B", "switch session / history", key, description),
