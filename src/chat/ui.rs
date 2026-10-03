@@ -842,6 +842,14 @@ fn draw_overlay(frame: &mut Frame, app: &ChatApp, overlay: Overlay, area: Rect) 
             tool_call_lines(&preview),
             None,
         ),
+        Overlay::Quit => (
+            " quit (Enter/y quit · Esc/n cancel) ".to_owned(),
+            vec![Line::from(Span::styled(
+                "Quit the chat? The session is saved either way.",
+                Style::default().fg(Color::Yellow),
+            ))],
+            None,
+        ),
     };
 
     let mut lines = lines;
@@ -1539,5 +1547,15 @@ mod tests {
             }
         }
         assert!(highlighted, "a match should be highlighted:\n{screen}");
+    }
+
+    #[test]
+    fn renders_the_quit_confirmation() {
+        let (_dir, mut app) = app(transcript());
+        app.overlay = Some(Overlay::Quit);
+        let screen = text(&snapshot(&mut app, 80, 24));
+
+        assert!(screen.contains("Quit the chat?"), "{screen}");
+        assert!(screen.contains("Esc/n cancel"), "{screen}");
     }
 }

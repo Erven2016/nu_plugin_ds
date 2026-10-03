@@ -158,6 +158,10 @@ denylist.**
 | `Ctrl+A` / `Ctrl+E` | jump to the start / end of the line |
 | `Ctrl+U` / `Ctrl+K` / `Ctrl+W` | readline style editing (kill line, kill to end, delete word) |
 
+Quitting — `Ctrl+X`, `Ctrl+C`, `Ctrl+D` on an empty prompt, or `/quit` — asks for
+confirmation first: `Enter` or `y` quits, `Esc` or `n` stays. The session is saved either
+way.
+
 While a tool call is waiting to be confirmed the keys above are replaced by `Enter` (run
 it), `Esc` (skip it) and `a` (allow this class of call for the rest of the session); that
 table is under [File tools and commands](#file-tools-and-commands).

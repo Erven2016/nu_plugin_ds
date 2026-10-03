@@ -99,6 +99,8 @@ pub enum Overlay {
         index: usize,
     },
     Help,
+    /// A confirmation before the window closes.
+    Quit,
     /// A tool call waiting for approval.
     ToolCall {
         /// 1-based position of this call in the round.
@@ -577,17 +579,17 @@ impl ChatApp {
                             StatusKind::Warn,
                         );
                     } else {
-                        self.should_quit = true;
+                        self.request_quit();
                     }
                     return;
                 }
                 KeyCode::Char('x') => {
-                    self.should_quit = true;
+                    self.request_quit();
                     return;
                 }
                 KeyCode::Char('d') => {
                     if self.input.is_empty() {
-                        self.should_quit = true;
+                        self.request_quit();
                     } else {
                         self.input.delete();
                     }
@@ -876,12 +878,27 @@ impl ChatApp {
                 }
                 _ => {}
             },
+            Overlay::Quit => match key.code {
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.should_quit = true;
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.overlay = None;
+                }
+                _ => {}
+            },
         }
     }
 
     fn open_overlay(&mut self, overlay: Overlay) {
         self.pending_delete = false;
         self.overlay = Some(overlay);
+    }
+
+    /// Ask before quitting instead of closing on the first key. The session is saved on the
+    /// way out either way.
+    fn request_quit(&mut self) {
+        self.open_overlay(Overlay::Quit);
     }
 
     // -------------------------------------------------------------- commands
@@ -928,7 +945,7 @@ impl ChatApp {
 
         match command {
             "/help" | "/?" => self.open_overlay(Overlay::Help),
-            "/quit" | "/exit" | "/q" => self.should_quit = true,
+            "/quit" | "/exit" | "/q" => self.request_quit(),
             "/clear" => {
                 self.session.clear_transcript();
                 // The cleared transcript has to reach the file here: switching away and back
@@ -2012,9 +2029,11 @@ mod tests {
         app.running_tool = None;
         app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(
-            app.should_quit,
-            "Ctrl+C should quit once nothing is running"
+            matches!(app.overlay, Some(Overlay::Quit)),
+            "Ctrl+C should ask to quit once nothing is running"
         );
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.should_quit, "Enter should confirm the quit");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2206,6 +2225,47 @@ mod tests {
             app.input.text().contains('\n'),
             "Shift+Enter should insert a newline"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quitting_asks_for_confirmation_first() {
+        let dir = temp_dir("quit-confirm");
+        let session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let mut app = test_app(&dir, session);
+
+        // Ctrl+X no longer closes the window; it asks.
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(!app.should_quit, "Ctrl+X must not quit immediately");
+        assert!(matches!(app.overlay, Some(Overlay::Quit)));
+
+        // Esc stays open.
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.should_quit, "Esc must cancel the quit");
+        assert!(app.overlay.is_none(), "the confirmation should close");
+
+        // Ctrl+X then Enter quits.
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.should_quit, "Enter should confirm the quit");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_quit_slash_command_asks_too() {
+        let dir = temp_dir("quit-slash");
+        let session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let mut app = test_app(&dir, session);
+
+        assert!(app.run_slash_command("/quit"));
+        assert!(!app.should_quit, "/quit must ask first");
+        assert!(matches!(app.overlay, Some(Overlay::Quit)));
+
+        // `y` confirms.
+        app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(app.should_quit, "y should confirm the quit");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
