@@ -138,36 +138,72 @@ denylist.**
 | Key | Action |
 | --- | --- |
 | `Enter` | send the prompt |
-| `Alt+Enter` | insert a newline |
+| `Shift+Enter`, `Ctrl+Enter` | insert a newline |
+| `Esc` | cancel the answer, or clear the prompt |
+| `Ctrl+C` | cancel the answer (when nothing is running it quits instead) |
+| `Ctrl+X` | quit |
+| `Ctrl+D` | quit when the prompt is empty; otherwise delete the character under the cursor |
 | `Ctrl+O` | switch model (the list comes from `GET /models`) |
 | `Ctrl+T` | switch thinking level (`off` / `low` / `medium` / `high`) |
-| `Ctrl+B` | browse sessions; `n` creates one, `d` twice deletes one |
+| `Ctrl+B` | browse sessions (see below) |
 | `Ctrl+N` | start a new session |
 | `Ctrl+R` | regenerate the last answer |
-| `Ctrl+C` | cancel the answer, or quit when nothing is running |
-| `Ctrl+X` | quit |
+| `Ctrl+F` | search the transcript (see below) |
+| `Ctrl+/` | the full help card |
 | `Ctrl+L` | jump to the end of the transcript |
-| `Esc` | cancel the answer, or clear the prompt |
+| `Ctrl+Home` / `Ctrl+End` | jump to the top / bottom of the transcript |
 | `PgUp` / `PgDn`, `Alt+↑` / `Alt+↓` | scroll the transcript |
 | `Up` / `Down` | move in the prompt; on the first line they browse the input history |
-| `Ctrl+A` / `Ctrl+E` / `Ctrl+U` / `Ctrl+K` / `Ctrl+W` | readline style editing |
-| `Ctrl+/` | the full help card |
+| `Left` / `Right`, `Home` / `End`, `Delete`, `Backspace` | move in or edit the prompt |
+| `Ctrl+A` / `Ctrl+E` | jump to the start / end of the line |
+| `Ctrl+U` / `Ctrl+K` / `Ctrl+W` | readline style editing (kill line, kill to end, delete word) |
+
+While a tool call is waiting to be confirmed the keys above are replaced by `Enter` (run
+it), `Esc` (skip it) and `a` (allow this class of call for the rest of the session); that
+table is under [File tools and commands](#file-tools-and-commands).
+
+Session picker (`Ctrl+B`):
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓`, `k` / `j` | move the selection |
+| `n` | create a new session |
+| `d`, `d` | delete the selected session (press `d` twice to confirm). Deleting the open conversation also closes it, and the picker stays open so another can be chosen |
+| `Enter` | open the selected session |
+| `Esc` | close the picker |
+
+Search (`Ctrl+F`):
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+F` | open the search, or close it again |
+| typing | filter the transcript live (case-insensitive substring) |
+| `Enter` / `↓` | next match |
+| `Shift+Enter` / `↑` | previous match |
+| `Esc` | close the search and restore the prompt draft |
+
+Matches are highlighted in the transcript, the current one in a stronger colour, and each
+step scrolls it into view. The prompt title reads `n/total` while searching.
 
 ### Slash commands
 
 `/help` · `/model [name]` · `/think [off|low|medium|high]` · `/sessions` · `/new [name]` ·
-`/compact` · `/clear` · `/system [text]` · `/markdown` · `/tools` · `/regenerate` · `/models` · `/save` · `/quit`
+`/compact` · `/clear` · `/system [text]` · `/markdown` · `/tools` · `/regenerate` · `/models` ·
+`/balance` · `/save` · `/quit`
 
 ### Status bar
 
-The first line reports the current turn (a spinner while waiting, the stream time and token
-count while receiving) followed by the model, the thinking level, the session title and how
-many times the history was compacted.
+The first line reports the current turn — a spinner while waiting or streaming, and
+`running <tool> (Ns)` with its own spinner while a tool call runs — followed by the model,
+the thinking level, a `tools:off` / `tools:auto` marker when it applies, the session title
+and how many times the history was compacted. When the provider offers a balance endpoint,
+the remaining credit sits at the right of this line, e.g. `balance CNY 110.00 (gift 10.00)`.
 
 The second line reports the context budget: an estimated usage bar against the model's
-context window, the estimated tokens in use, and the session totals (`↑` prompt, `↓`
-completion, `Σ` total). Real usage figures from the API replace the estimates as soon as a
-turn finishes.
+context window (the estimate is local, since the plugin never sees a tokenizer), the
+percentage and tokens in use, the session totals reported by the API (`↑` prompt, `↓`
+completion, `Σ` total), the compaction ratio in force (`compact:75%`) and the prompt cache
+hit rate (`cache:62%`).
 
 ## Context compaction
 
