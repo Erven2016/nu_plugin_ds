@@ -24,10 +24,10 @@ pub const ENV_CONFIG_DIR: &str = "NU_PLUGIN_DS_CONFIG_DIR";
 
 /// The public DeepSeek endpoint.
 pub const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
-/// The general purpose, non-thinking model.
-pub const DEFAULT_MODEL: &str = "deepseek-chat";
-/// The reasoning model, used when thinking is enabled and no other model was picked.
-pub const REASONING_MODEL: &str = "deepseek-reasoner";
+/// The general purpose model, used when a session does not pin one.
+pub const DEFAULT_MODEL: &str = "deepseek-flash";
+/// The stronger model, used when thinking is enabled and no model was chosen.
+pub const REASONING_MODEL: &str = "deepseek-v4-pro";
 
 /// How much reasoning the model should spend on an answer.
 ///
@@ -309,8 +309,8 @@ mod tests {
 
     #[test]
     fn both_models_expose_128k() {
-        assert_eq!(model_context_limit("deepseek-chat"), 128_000);
-        assert_eq!(model_context_limit("deepseek-reasoner"), 128_000);
+        assert_eq!(model_context_limit("deepseek-flash"), 128_000);
+        assert_eq!(model_context_limit("deepseek-v4-pro"), 128_000);
         assert_eq!(model_context_limit("some-future-model"), 128_000);
     }
 
@@ -320,8 +320,8 @@ mod tests {
             context_limit: Some(4_096),
             ..Settings::default()
         };
-        assert_eq!(settings.effective_context_limit("deepseek-chat"), 4_096);
-        assert_eq!(settings.compact_at("deepseek-chat"), 3_072);
+        assert_eq!(settings.effective_context_limit("deepseek-flash"), 4_096);
+        assert_eq!(settings.compact_at("deepseek-flash"), 3_072);
     }
 
     #[test]
@@ -329,10 +329,10 @@ mod tests {
         let settings = Settings::default();
         assert_eq!(settings.context_limit, None);
         assert_eq!(
-            settings.effective_context_limit("deepseek-chat"),
-            model_context_limit("deepseek-chat")
+            settings.effective_context_limit("deepseek-flash"),
+            model_context_limit("deepseek-flash")
         );
-        assert_eq!(settings.compact_at("deepseek-chat"), 96_000);
+        assert_eq!(settings.compact_at("deepseek-flash"), 96_000);
     }
 
     #[test]
@@ -342,7 +342,7 @@ mod tests {
             compact_ratio: 0.0,
             ..Settings::default()
         };
-        assert_eq!(settings.compact_at("deepseek-chat"), 1);
+        assert_eq!(settings.compact_at("deepseek-flash"), 1);
     }
 
     #[test]
@@ -351,7 +351,7 @@ mod tests {
             context_limit: Some(1_000_000),
             ..Settings::default()
         };
-        let warning = over.context_limit_warning("deepseek-chat").unwrap();
+        let warning = over.context_limit_warning("deepseek-flash").unwrap();
         assert!(warning.contains("1000000"), "{warning}");
         assert!(warning.contains("128000"), "{warning}");
 
@@ -359,10 +359,10 @@ mod tests {
             context_limit: Some(65_536),
             ..Settings::default()
         };
-        assert_eq!(under.context_limit_warning("deepseek-chat"), None);
+        assert_eq!(under.context_limit_warning("deepseek-flash"), None);
 
         let unset = Settings::default();
-        assert_eq!(unset.context_limit_warning("deepseek-chat"), None);
+        assert_eq!(unset.context_limit_warning("deepseek-flash"), None);
     }
 
     #[test]

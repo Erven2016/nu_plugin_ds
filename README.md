@@ -60,7 +60,7 @@ $env.DEEPSEEK_API_KEY = "sk-..."        # override the stored key for one sessio
 ```nu
 chat                                              # continue the most recent conversation
 chat --new                                        # start a fresh one
-chat --new --model deepseek-reasoner --think high  # pick the model and reasoning level
+chat --new --model deepseek-v4-pro --think high    # pick the model and reasoning level
 chat --session planning                            # reopen a conversation by title or id
 chat --prompt "explain this stack trace"           # ask immediately
 chat -p "hi" --return-session | get usage          # get the session record as well
@@ -117,9 +117,9 @@ and a preview of what will happen, and waits for a key:
 `max_tool_rounds` (how many rounds one turn may use before it stops) also apply.
 
 **Reading a file sends its contents to DeepSeek.** The confirmation says so before you
-approve it. `deepseek-reasoner` does not support tool calling, so the tools are left out
-for that model. Tool calls and their results are stored in the session like any other
-message, so a conversation that used a tool reopens with its full history.
+approve it. Both current models (`deepseek-flash` and `deepseek-v4-pro`) support tool
+calling. Tool calls and their results are stored in the session like any other message, so a
+conversation that used a tool reopens with its full history.
 
 #### `run_nu`
 
@@ -211,12 +211,12 @@ hit rate (`cache:62%`).
 
 ## Context compaction
 
-The context window belongs to the model, not to the plugin: both DeepSeek models
-(`deepseek-chat` and `deepseek-reasoner`) expose 128K tokens, and the API refuses a longer
-request. `context_limit` is the *local* budget that decides when history is compressed; it
-defaults to the model's window, and `compact_ratio` is the fraction of it that triggers
-compaction. Set `context_limit` only when the endpoint behind `base_url` really serves a
-different window.
+The context window belongs to the model, not to the plugin: the current DeepSeek models
+(`deepseek-flash` and `deepseek-v4-pro`) expose a 1M token context, and the API refuses a
+longer request. `context_limit` is the *local* budget that decides when history is
+compressed; it defaults to the model's window, and `compact_ratio` is the fraction of it
+that triggers compaction. Set `context_limit` only when the endpoint behind `base_url`
+really serves a different window.
 
 Once the estimate passes `context_limit * compact_ratio`:
 
@@ -225,12 +225,12 @@ Once the estimate passes `context_limit * compact_ratio`:
 2. those messages are replaced by a single `system` message holding the summary;
 3. the prompt, the most recent `keep_recent_messages` messages and the summary are kept.
 
-DeepSeek does **not** offer a 1M token context, so setting `context_limit: 1000000` does
-not buy a bigger window: it only means the API will refuse the request before the local
-budget is reached. That is not fatal — when a request is refused as too long, the plugin
-compacts and retries automatically (up to two times), and the summarising request is capped
-so it cannot overflow in turn. If your endpoint really does serve a larger window, set
-`context_limit` to that number and the plugin will use it as the budget.
+Setting `context_limit` larger than the window the endpoint actually serves does not buy a
+bigger one: it only means the API will refuse the request before the local budget is
+reached. That is not fatal — when a request is refused as too long, the plugin compacts and
+retries automatically (up to two times), and the summarising request is capped so it cannot
+overflow in turn. If your endpoint really does serve a larger window, set `context_limit` to
+that number and the plugin will use it as the budget.
 
 The summary lives in the session, so reopening a conversation keeps its compressed history.
 Token counts are estimates (Latin text is counted at roughly four characters per token, CJK
@@ -241,7 +241,7 @@ at about one token per character); only the compaction trigger and the gauge dep
 ```nu
 > cc "列出当前目录所有文件"
   ls ./
-  ── deepseek-chat · think:off
+  ── deepseek-flash · think:off
   run this command? [Enter] yes  [Esc] no
 ```
 
@@ -339,7 +339,7 @@ Settings live in `settings.json` in the plugin's config directory
 ```json
 {
   "base_url": "https://api.deepseek.com",
-  "model": "deepseek-chat",
+  "model": "deepseek-flash",
   "thinking": "off",
   "temperature": null,
   "max_tokens": null,
@@ -363,8 +363,8 @@ Settings live in `settings.json` in the plugin's config directory
 | `base_url` | API root, without `/v1`. `$env.DEEPSEEK_BASE_URL` overrides it. |
 | `model` | model used when a session does not pin one |
 | `thinking` | `off`, `low`, `medium` or `high` |
-| `temperature`, `max_tokens` | passed to the API; temperature is dropped for `*-reasoner` models |
-| `context_limit` | local token budget that triggers compaction; `null` (the default) uses the model's window (128K) |
+| `temperature`, `max_tokens` | passed to the API; temperature is ignored while thinking is on |
+| `context_limit` | local token budget that triggers compaction; `null` (the default) uses the model's window (1M) |
 | `compact_ratio` | fraction of the effective context limit that triggers compaction |
 | `keep_recent_messages` | messages always kept verbatim when compacting |
 | `markdown` | render answers as markdown (`true` by default) |
@@ -389,9 +389,12 @@ Environment variables: `DEEPSEEK_API_KEY` (optional if a key is stored),
   plugin to a local socket automatically — re-run `plugin add --force <binary>` if `chat`
   reports that it cannot take over the terminal. Without a terminal, `chat --prompt` still
   works as a single request.
-* **Thinking levels are sent as `reasoning_effort`.** DeepSeek's OpenAI-compatible API
-  accepts the field for thinking models and ignores it for the others. If your account
-  rejects it, keep `thinking` at `off`, or set `--think off` for a single call.
+* **Thinking mode is on by default in the current models.** `thinking: off` is sent as an
+  explicit `{"thinking": {"type": "disabled"}}` switch, because the API's own default is
+  on; `low`, `medium` and `high` are sent as `reasoning_effort`. While thinking is on the
+  API ignores `temperature`, so it only takes effect with thinking off. The thinking from
+  earlier turns is echoed back to the API, which requires it once the request carries
+  tools.
 * **`cc` runs the generated command in a subprocess**, so it cannot mutate your shell state
   (see above). The model writes the command; read it before pressing Enter.
 * **The API key is read from `--api-key`, then `$env.DEEPSEEK_API_KEY`, then the OS

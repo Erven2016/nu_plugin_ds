@@ -49,7 +49,7 @@ are shown and confirmed first (Enter runs it, Esc skips it, and `a` allows every
 that class for the session). /tools toggles them, and the settings `tools`,
 `confirm_tool_reads`, `confirm_tool_writes`, `confirm_tool_commands` and
 `tool_command_timeout_secs` control the defaults. Reading a file sends its contents to
-DeepSeek. `deepseek-reasoner` cannot call tools.
+DeepSeek.
 
 `run_nu` runs each command in a fresh nushell process, so `cd` and `$env` changes do not
 persist between calls and no shell state is changed. Its output is captured, truncated per
@@ -146,7 +146,7 @@ single-turn request: it requires `--prompt` and returns the answer as a string."
             },
             Example {
                 description: "Start a fresh conversation with the reasoning model",
-                example: "chat --new --model deepseek-reasoner --think high",
+                example: "chat --new --model deepseek-v4-pro --think high",
                 result: None,
             },
             Example {
@@ -379,7 +379,7 @@ fn single_turn(
 
     session.push(ChatMessage::user(prompt.trim()));
 
-    // `deepseek-reasoner` does not support tool calling, so the tools are left out.
+    // A legacy `*-reasoner` name marks a thinking-only model, which cannot call tools.
     let tools_active = tools_enabled && !session.model.contains("reasoner");
     // The command tool is only offered when a `nu` executable was found.
     let offer_commands = tools_active && context.nu_bin.is_some();

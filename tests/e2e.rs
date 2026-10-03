@@ -175,15 +175,15 @@ const CHAT_PATH: &str = "/chat/completions";
 fn models_response() -> MockResponse {
     MockResponse::json(
         r#"{"object":"list","data":[
-            {"id":"deepseek-reasoner","object":"model","owned_by":"deepseek"},
-            {"id":"deepseek-chat","object":"model","owned_by":"deepseek"}
+            {"id":"deepseek-v4-pro","object":"model","owned_by":"deepseek"},
+            {"id":"deepseek-flash","object":"model","owned_by":"deepseek"}
         ]}"#,
     )
 }
 
 fn non_streaming_answer(text: &str) -> MockResponse {
     MockResponse::json(format!(
-        r#"{{"model":"deepseek-chat","choices":[{{"index":0,"message":{{"role":"assistant","content":"{text}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":11,"completion_tokens":5,"total_tokens":16}}}}"#
+        r#"{{"model":"deepseek-flash","choices":[{{"index":0,"message":{{"role":"assistant","content":"{text}"}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":11,"completion_tokens":5,"total_tokens":16}}}}"#
     ))
 }
 
@@ -198,7 +198,7 @@ fn context_overflow_error() -> MockResponse {
 /// A blocking reply that asks for a tool call.
 fn tool_call_answer(id: &str, name: &str, arguments: serde_json::Value) -> MockResponse {
     let body = serde_json::json!({
-        "model": "deepseek-chat",
+        "model": "deepseek-flash",
         "choices": [{
             "index": 0,
             "message": {
@@ -221,7 +221,7 @@ fn tool_call_answer(id: &str, name: &str, arguments: serde_json::Value) -> MockR
 
 fn models_and_escaped_answer(text: &str) -> Vec<(&'static str, MockResponse)> {
     let body = serde_json::json!({
-        "model": "deepseek-chat",
+        "model": "deepseek-flash",
         "choices": [{
             "index": 0,
             "message": {"role": "assistant", "content": text},
@@ -317,7 +317,7 @@ fn asks_one_question_without_a_terminal() {
     assert_eq!(count, 1, "the session should be stored under {sessions:?}");
 
     let body = harness.body_for(CHAT_PATH);
-    assert_eq!(body["model"], serde_json::json!("deepseek-chat"));
+    assert_eq!(body["model"], serde_json::json!("deepseek-flash"));
     assert_eq!(body["messages"][0]["content"], serde_json::json!("say hi"));
 }
 
@@ -392,7 +392,7 @@ fn manages_sessions_through_nushell() {
 
     let stdout = harness.ok("ds sessions | first | get model");
     assert!(
-        stdout.contains("deepseek-chat"),
+        stdout.contains("deepseek-flash"),
         "unexpected model: {stdout}"
     );
 }
@@ -816,7 +816,7 @@ fn compacts_and_retries_when_the_model_rejects_the_history() {
     // A long history, written with the library's own types so the plugin reads it back.
     let store = SessionStore::new(harness.home.path().join("sessions"))
         .expect("could not open the session store");
-    let mut session = Session::new("long", "deepseek-chat", ThinkingEffort::Off, None);
+    let mut session = Session::new("long", "deepseek-flash", ThinkingEffort::Off, None);
     for i in 0..6 {
         session.push(ChatMessage::user(format!("question {i}")));
         session.push(ChatMessage::assistant(format!("answer {i}")));

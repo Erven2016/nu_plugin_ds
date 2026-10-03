@@ -407,7 +407,7 @@ mod tests {
     fn clearing_forgets_the_messages_but_keeps_the_system_prompt() {
         let mut session = Session::new(
             "demo",
-            "deepseek-chat",
+            "deepseek-flash",
             ThinkingEffort::Off,
             Some("be nice"),
         );
@@ -425,7 +425,7 @@ mod tests {
     fn clearing_keeps_the_prompt_the_session_actually_has() {
         // `/system` rewrites the first message without touching the settings, so a clear has
         // to preserve the session's own prompt rather than whatever the settings hold.
-        let mut session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         session
             .messages
             .insert(0, ChatMessage::system("edited prompt"));
@@ -439,7 +439,7 @@ mod tests {
 
     #[test]
     fn clearing_without_a_system_prompt_leaves_nothing() {
-        let mut session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         session.push(ChatMessage::user("hello"));
         session.push(ChatMessage::assistant("hi"));
 
@@ -453,7 +453,7 @@ mod tests {
         // The cleared transcript has to survive a reload, which is the whole point of the
         // clear: writing the now-empty session must replace the old file on disk.
         let (_dir, store) = temp_store();
-        let mut session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         session.push(ChatMessage::user("hello"));
         session.push(ChatMessage::assistant("hi"));
         store.save(&session).unwrap();
@@ -470,7 +470,7 @@ mod tests {
         let (_dir, store) = temp_store();
         let mut session = Session::new(
             "demo",
-            "deepseek-chat",
+            "deepseek-flash",
             ThinkingEffort::Off,
             Some("be nice"),
         );
@@ -489,14 +489,14 @@ mod tests {
 
     #[test]
     fn titles_fall_back_to_the_first_user_message() {
-        let mut session = Session::new("", "deepseek-chat", ThinkingEffort::Off, None);
+        let mut session = Session::new("", "deepseek-flash", ThinkingEffort::Off, None);
         session.push(ChatMessage::user("列出当前目录所有文件"));
         assert_eq!(session.title(), "列出当前目录所有文件");
     }
 
     #[test]
     fn regeneration_drops_only_the_answer() {
-        let mut session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         session.push(ChatMessage::user("one"));
         session.push(ChatMessage::assistant("first"));
         session.push(ChatMessage::assistant("second"));
@@ -525,7 +525,7 @@ mod tests {
     }
 
     fn session_with_calls(ids: &[&str]) -> Session {
-        let mut session = Session::new("", "deepseek-chat", ThinkingEffort::Off, None);
+        let mut session = Session::new("", "deepseek-flash", ThinkingEffort::Off, None);
         let mut assistant = ChatMessage::assistant("");
         assistant.tool_calls = Some(ids.iter().map(|id| tool_call(id)).collect());
         session.push(assistant);
@@ -565,7 +565,7 @@ mod tests {
     }
 
     fn long_session() -> Session {
-        let mut session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, Some("sys"));
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, Some("sys"));
         for i in 0..5 {
             session.push(ChatMessage::user(format!("question {i}")));
             session.push(ChatMessage::assistant(format!("answer {i}")));
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn a_short_session_plans_nothing() {
-        let mut session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, Some("sys"));
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, Some("sys"));
         session.push(ChatMessage::user("hello"));
         session.push(ChatMessage::assistant("hi"));
         assert!(session.compaction_plan(2).is_none());
@@ -611,7 +611,7 @@ mod tests {
     #[test]
     fn resolves_by_title_prefix() {
         let (_dir, store) = temp_store();
-        let session = Session::new("planning", "deepseek-chat", ThinkingEffort::Off, None);
+        let session = Session::new("planning", "deepseek-flash", ThinkingEffort::Off, None);
         store.save(&session).unwrap();
 
         assert_eq!(store.resolve("plan").unwrap().id, session.id);

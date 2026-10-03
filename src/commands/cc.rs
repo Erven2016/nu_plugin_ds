@@ -12,7 +12,7 @@ use nu_protocol::{
 };
 
 use crate::DsPlugin;
-use crate::api::{ChatRequest, WireMessage};
+use crate::api::{ChatRequest, WireMessage, thinking_params};
 
 use super::common;
 
@@ -145,18 +145,21 @@ fn run(engine: &EngineInterface, call: &EvaluatedCall) -> Result<Value> {
         .get_current_dir()
         .unwrap_or_else(|_| paths.dir().display().to_string());
 
+    let (thinking, reasoning_effort) = thinking_params(settings.thinking);
     let request = ChatRequest::new(
         &model,
         vec![
             WireMessage {
                 role: "system".to_owned(),
                 content: system_prompt(&cwd, &paths),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
             },
             WireMessage {
                 role: "user".to_owned(),
                 content: request_text.trim().to_owned(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
             },
@@ -164,7 +167,8 @@ fn run(engine: &EngineInterface, call: &EvaluatedCall) -> Result<Value> {
     )
     .max_tokens(Some(1024))
     .temperature(Some(0.0))
-    .reasoning_effort(settings.thinking.as_api());
+    .thinking(thinking)
+    .reasoning_effort(reasoning_effort);
 
     let response = common::block_on(client.complete(&request))?;
     let command = extract_command(&response.text());

@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 
 /// A message as stored in a session and sent back to the API.
 ///
-/// `reasoning_content` is persisted so the TUI can redraw old answers, but it is never
-/// sent back to the API: the wire representation is [`WireMessage`].
+/// `reasoning_content` is persisted so the TUI can redraw old answers. It is also echoed
+/// back on the wire: once a request carries `tools`, DeepSeek requires the thinking from
+/// earlier turns to be returned, or it rejects the call with a 400.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ChatMessage {
     pub role: Role,
@@ -117,6 +118,10 @@ impl Role {
 pub struct WireMessage {
     pub role: String,
     pub content: String,
+    /// The assistant's thinking. Once tools are in play the API requires this back, or it
+    /// rejects the request with a 400; without tools it is ignored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,6 +133,7 @@ impl From<&ChatMessage> for WireMessage {
         WireMessage {
             role: message.role.as_str().to_owned(),
             content: message.content.clone(),
+            reasoning_content: message.reasoning_content.clone(),
             tool_calls: message.tool_calls.clone(),
             tool_call_id: message.tool_call_id.clone(),
         }
@@ -339,6 +345,20 @@ pub struct StreamOptions {
     pub include_usage: bool,
 }
 
+/// DeepSeek's switch for the thinking mode, which is on by default.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThinkingToggle {
+    #[serde(rename = "type")]
+    pub kind: ThinkingKind,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingKind {
+    Enabled,
+    Disabled,
+}
+
 /// A chat completions request.
 #[derive(Serialize, Clone, Debug)]
 pub struct ChatRequest {
@@ -353,6 +373,10 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Turns the thinking mode on or off. It is on by default, so this is only sent to turn
+    /// it off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingToggle>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -369,6 +393,7 @@ impl ChatRequest {
             max_tokens: None,
             temperature: None,
             reasoning_effort: None,
+            thinking: None,
             tools: None,
             tool_choice: None,
         }
@@ -394,6 +419,11 @@ impl ChatRequest {
 
     pub fn reasoning_effort(mut self, effort: Option<impl Into<String>>) -> Self {
         self.reasoning_effort = effort.map(Into::into);
+        self
+    }
+
+    pub fn thinking(mut self, thinking: Option<ThinkingToggle>) -> Self {
+        self.thinking = thinking;
         self
     }
 
@@ -594,10 +624,10 @@ mod tests {
 
     #[test]
     fn streaming_request_asks_for_usage() {
-        let request = ChatRequest::new("deepseek-chat", vec![]).stream(true);
+        let request = ChatRequest::new("deepseek-flash", vec![]).stream(true);
         assert!(request.stream_options.is_some_and(|o| o.include_usage));
 
-        let request = ChatRequest::new("deepseek-chat", vec![]).stream(false);
+        let request = ChatRequest::new("deepseek-flash", vec![]).stream(false);
         assert!(request.stream_options.is_none());
     }
 
@@ -721,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_messages_keep_tools_but_drop_reasoning() {
+    fn wire_messages_keep_tools_and_reasoning() {
         let mut assistant = ChatMessage::assistant("").with_reasoning("private thoughts");
         assistant.tool_calls = Some(vec![ToolCall {
             id: "call_0".to_owned(),
@@ -738,15 +768,33 @@ mod tests {
             ..ChatMessage::new(Role::Tool, "ok")
         };
 
-        let request = ChatRequest::new("deepseek-chat", vec![(&assistant).into(), (&tool).into()]);
+        let request = ChatRequest::new("deepseek-flash", vec![(&assistant).into(), (&tool).into()]);
         let json = serde_json::to_value(&request).unwrap();
 
         assert_eq!(
             json["messages"][0]["tool_calls"][0]["function"]["name"],
             "write_file"
         );
-        assert!(json["messages"][0].get("reasoning_content").is_none());
+        assert_eq!(
+            json["messages"][0]["reasoning_content"],
+            serde_json::json!("private thoughts")
+        );
         assert_eq!(json["messages"][1]["role"], "tool");
         assert_eq!(json["messages"][1]["tool_call_id"], "call_0");
+    }
+
+    #[test]
+    fn thinking_mode_is_switched_off_explicitly() {
+        let disabled = ChatRequest::new("deepseek-flash", vec![]).thinking(Some(ThinkingToggle {
+            kind: ThinkingKind::Disabled,
+        }));
+        let json = serde_json::to_value(&disabled).unwrap();
+        assert_eq!(json["thinking"]["type"], serde_json::json!("disabled"));
+
+        let enabled = ChatRequest::new("deepseek-flash", vec![]).thinking(Some(ThinkingToggle {
+            kind: ThinkingKind::Enabled,
+        }));
+        let json = serde_json::to_value(&enabled).unwrap();
+        assert_eq!(json["thinking"]["type"], serde_json::json!("enabled"));
     }
 }

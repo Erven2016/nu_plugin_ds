@@ -13,6 +13,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use crate::config::ThinkingEffort;
+
 /// An API key plus the settings needed to talk to DeepSeek.
 ///
 /// Cloning is cheap: the underlying [`reqwest::Client`] is reference counted.
@@ -155,11 +157,12 @@ pub enum BalanceProbe {
 
 /// Build the request for one turn of a conversation.
 ///
-/// Two DeepSeek quirks are handled here: `reasoning_content` is never sent back, and
-/// thinking-only models do not get a custom temperature.
+/// Two DeepSeek behaviours are handled here: the thinking content of earlier turns is kept
+/// on the wire (the API requires it once `tools` are involved), and thinking mode — on by
+/// default — is switched off explicitly rather than left to the model's default.
 pub fn build_chat_request(
     model: &str,
-    thinking: crate::config::ThinkingEffort,
+    thinking: ThinkingEffort,
     max_tokens: Option<u32>,
     temperature: Option<f32>,
     messages: &[ChatMessage],
@@ -171,17 +174,30 @@ pub fn build_chat_request(
         .map(Into::into)
         .collect();
 
-    let temperature = if model.contains("reasoner") {
-        None
-    } else {
-        temperature
-    };
+    let (toggle, effort) = thinking_params(thinking);
 
     ChatRequest::new(model, wire)
         .stream(stream)
         .max_tokens(max_tokens)
         .temperature(temperature)
-        .reasoning_effort(thinking.as_api())
+        .thinking(toggle)
+        .reasoning_effort(effort)
+}
+
+/// The thinking parameters for an effort level: the on/off switch, and the effort itself.
+///
+/// Thinking is on by default, so `off` has to be sent explicitly; every other level only
+/// needs `reasoning_effort`.
+pub fn thinking_params(effort: ThinkingEffort) -> (Option<ThinkingToggle>, Option<&'static str>) {
+    match effort {
+        ThinkingEffort::Off => (
+            Some(ThinkingToggle {
+                kind: ThinkingKind::Disabled,
+            }),
+            None,
+        ),
+        other => (None, other.as_api()),
+    }
 }
 
 /// Attach the tools the model may call to a request that was already built.
@@ -280,25 +296,52 @@ mod tests {
     }
 
     #[test]
-    fn wire_messages_drop_reasoning() {
+    fn wire_messages_carry_reasoning_back() {
+        // With tools in play the API needs the thinking content back, or it 400s.
         let message = ChatMessage::assistant("answer").with_reasoning("private thoughts");
         let wire: WireMessage = (&message).into();
         assert_eq!(wire.role, "assistant");
         assert_eq!(wire.content, "answer");
 
-        let request = ChatRequest::new("deepseek-reasoner", vec![wire]);
+        let request = ChatRequest::new("deepseek-v4-pro", vec![wire]);
         let json = serde_json::to_value(&request).unwrap();
-        assert!(
-            json.get("messages").unwrap()[0]
-                .get("reasoning_content")
-                .is_none()
+        assert_eq!(
+            json["messages"][0]["reasoning_content"],
+            serde_json::json!("private thoughts")
         );
         assert!(json.get("stream_options").is_none());
     }
 
     #[test]
+    fn turning_thinking_off_is_explicit() {
+        let off = build_chat_request(
+            "deepseek-flash",
+            ThinkingEffort::Off,
+            None,
+            None,
+            &[],
+            false,
+        );
+        let json = serde_json::to_value(&off).unwrap();
+        assert_eq!(json["thinking"]["type"], serde_json::json!("disabled"));
+        assert!(json.get("reasoning_effort").is_none());
+
+        let high = build_chat_request(
+            "deepseek-flash",
+            ThinkingEffort::High,
+            None,
+            None,
+            &[],
+            false,
+        );
+        let json = serde_json::to_value(&high).unwrap();
+        assert!(json.get("thinking").is_none());
+        assert_eq!(json["reasoning_effort"], serde_json::json!("high"));
+    }
+
+    #[test]
     fn reasoning_effort_is_omitted_when_disabled() {
-        let request = ChatRequest::new("deepseek-chat", vec![]).reasoning_effort(None::<String>);
+        let request = ChatRequest::new("deepseek-flash", vec![]).reasoning_effort(None::<String>);
         let json = serde_json::to_value(&request).unwrap();
         assert!(json.get("reasoning_effort").is_none());
     }

@@ -1222,8 +1222,8 @@ impl ChatApp {
         self.context_retries = 0;
         self.tools_withheld = false;
 
-        // `deepseek-reasoner` does not support tool calling, so the tools are left out
-        // rather than making every request fail.
+        // A legacy `*-reasoner` name marks a thinking-only model, which cannot call tools,
+        // so the tools are left out for it rather than making every request fail.
         self.tools_active = self.tools_enabled && !self.session.model.contains("reasoner");
         if self.tools_enabled && !self.tools_active {
             let notice = format!(
@@ -1787,6 +1787,7 @@ pub(crate) async fn summarise(
             WireMessage {
                 role: "system".to_owned(),
                 content: system,
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
             },
@@ -1796,6 +1797,7 @@ pub(crate) async fn summarise(
                     "Summarise this conversation excerpt so that it can replace the original \
                      messages as context:\n\n{transcript}"
                 ),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
             },
@@ -1929,7 +1931,7 @@ mod tests {
     #[test]
     fn clearing_persists_the_empty_transcript() {
         let dir = temp_dir("clear");
-        let mut session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         session.push(ChatMessage::user("hello"));
         session.push(ChatMessage::assistant("hi"));
         let id = session.id.clone();
@@ -1953,7 +1955,7 @@ mod tests {
     #[test]
     fn a_new_turn_is_refused_while_a_tool_runs() {
         let dir = temp_dir("busy");
-        let session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         let mut app = test_app(&dir, session);
         app.running_tool = Some(RunningTool {
             name: "run_nu".to_owned(),
@@ -1973,7 +1975,7 @@ mod tests {
     #[test]
     fn running_a_tool_reports_the_outcome_as_an_event() {
         let dir = temp_dir("tool-event");
-        let session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         let mut app = test_app(&dir, session);
         // No `nu` binary: the call fails, but only on the worker thread.
         app.context.nu_bin = None;
@@ -2016,7 +2018,7 @@ mod tests {
     #[test]
     fn ctrl_c_does_not_quit_while_a_tool_runs() {
         let dir = temp_dir("ctrl-c");
-        let session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         let mut app = test_app(&dir, session);
         app.running_tool = Some(RunningTool {
             name: "run_nu".to_owned(),
@@ -2041,7 +2043,7 @@ mod tests {
     #[test]
     fn the_wrap_up_round_withholds_the_tools() {
         let dir = temp_dir("wrap-up");
-        let session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         let mut app = test_app(&dir, session);
         app.tools_enabled = true;
         app.tools_active = true;
@@ -2071,7 +2073,7 @@ mod tests {
     #[test]
     fn hitting_the_tool_limit_asks_the_model_to_wrap_up() {
         let dir = temp_dir("tool-limit");
-        let session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         let mut app = test_app(&dir, session);
         app.settings.max_tool_rounds = 1;
         app.tool_rounds = 1; // the budget is already spent
@@ -2105,7 +2107,7 @@ mod tests {
     #[test]
     fn stepping_through_search_matches_scrolls_to_each() {
         let dir = temp_dir("search-step");
-        let session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         let mut app = test_app(&dir, session);
         app.scroll_max = 100;
         app.scroll = 0;
@@ -2136,7 +2138,7 @@ mod tests {
     #[test]
     fn paging_back_down_works_after_reaching_the_top() {
         let dir = temp_dir("scroll");
-        let session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         let mut app = test_app(&dir, session);
         // As if the transcript were long enough to scroll 100 lines.
         app.scroll_max = 100;
@@ -2164,7 +2166,7 @@ mod tests {
     #[test]
     fn deleting_the_open_session_closes_it_for_good() {
         let dir = temp_dir("delete-current");
-        let mut session = Session::new("open", "deepseek-chat", ThinkingEffort::Off, None);
+        let mut session = Session::new("open", "deepseek-flash", ThinkingEffort::Off, None);
         session.push(ChatMessage::user("hello"));
         let deleted_id = session.id.clone();
         let mut app = test_app(&dir, session);
@@ -2201,7 +2203,7 @@ mod tests {
     #[test]
     fn alt_enter_neither_sends_nor_edits() {
         let dir = temp_dir("alt-enter");
-        let session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         let mut app = test_app(&dir, session);
         app.input.set_text("hello");
 
@@ -2232,7 +2234,7 @@ mod tests {
     #[test]
     fn quitting_asks_for_confirmation_first() {
         let dir = temp_dir("quit-confirm");
-        let session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         let mut app = test_app(&dir, session);
 
         // Ctrl+X no longer closes the window; it asks.
@@ -2256,7 +2258,7 @@ mod tests {
     #[test]
     fn the_quit_slash_command_asks_too() {
         let dir = temp_dir("quit-slash");
-        let session = Session::new("demo", "deepseek-chat", ThinkingEffort::Off, None);
+        let session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
         let mut app = test_app(&dir, session);
 
         assert!(app.run_slash_command("/quit"));

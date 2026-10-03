@@ -30,8 +30,8 @@ fn chunk(delta: serde_json::Value) -> String {
 async fn lists_the_models_with_the_api_key() {
     let server = MockServer::start(vec![MockResponse::json(
         r#"{"object":"list","data":[
-            {"id":"deepseek-reasoner","object":"model","owned_by":"deepseek"},
-            {"id":"deepseek-chat","object":"model","owned_by":"deepseek"}
+            {"id":"deepseek-v4-pro","object":"model","owned_by":"deepseek"},
+            {"id":"deepseek-flash","object":"model","owned_by":"deepseek"}
         ]}"#,
     )])
     .await;
@@ -46,7 +46,7 @@ async fn lists_the_models_with_the_api_key() {
             .iter()
             .map(|model| model.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["deepseek-chat", "deepseek-reasoner"],
+        vec!["deepseek-flash", "deepseek-v4-pro"],
         "models should come back sorted"
     );
 
@@ -86,7 +86,7 @@ async fn streams_reasoning_content_and_usage() {
 
     let messages = vec![ChatMessage::user("hi")];
     let request = build_chat_request(
-        "deepseek-reasoner",
+        "deepseek-v4-pro",
         ThinkingEffort::High,
         Some(256),
         Some(0.9),
@@ -134,10 +134,10 @@ async fn streams_reasoning_content_and_usage() {
         body["messages"],
         serde_json::json!([{"role": "user", "content": "hi"}])
     );
-    // Thinking-only models reject a custom temperature, so it must be dropped.
+    // The current models are not name-guarded, so a custom temperature is sent as-is.
     assert!(
-        body.get("temperature").is_none(),
-        "reasoner requests must not carry a temperature: {body}"
+        body.get("temperature").is_some(),
+        "the temperature should be sent: {body}"
     );
 }
 
@@ -150,7 +150,7 @@ async fn reports_an_interrupted_stream() {
 
     let messages = vec![ChatMessage::user("hi")];
     let request = build_chat_request(
-        "deepseek-chat",
+        "deepseek-flash",
         ThinkingEffort::Off,
         None,
         None,
@@ -211,7 +211,7 @@ async fn explains_a_rejected_api_key() {
 #[tokio::test]
 async fn completes_without_streaming() {
     let server = MockServer::start(vec![MockResponse::json(
-        r#"{"model":"deepseek-chat","choices":[{"index":0,"message":{"role":"assistant","content":"ls ./"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":3,"total_tokens":12}}"#,
+        r#"{"model":"deepseek-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ls ./"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":3,"total_tokens":12}}"#,
     )])
     .await;
 
@@ -220,7 +220,7 @@ async fn completes_without_streaming() {
         ChatMessage::user("list files"),
     ];
     let request = build_chat_request(
-        "deepseek-chat",
+        "deepseek-flash",
         ThinkingEffort::Off,
         Some(64),
         Some(0.0),
@@ -274,7 +274,7 @@ async fn streams_a_tool_call_in_pieces() {
 
     let messages = vec![ChatMessage::user("write a file")];
     let request = build_chat_request(
-        "deepseek-chat",
+        "deepseek-flash",
         ThinkingEffort::Off,
         None,
         None,
@@ -353,7 +353,7 @@ async fn sends_tools_and_the_tool_conversation_back() {
     let messages = vec![ChatMessage::user("write a file")];
     let request = with_tools(
         build_chat_request(
-            "deepseek-chat",
+            "deepseek-flash",
             ThinkingEffort::Off,
             None,
             None,
@@ -377,7 +377,7 @@ async fn sends_tools_and_the_tool_conversation_back() {
         .expect("the completion should decode");
 
     // Second request: the conversation the model produced, with the tool result.
-    let mut assistant = ChatMessage::assistant("");
+    let mut assistant = ChatMessage::assistant("").with_reasoning("let me think");
     assistant.tool_calls = Some(vec![ToolCall {
         id: "call_1".to_owned(),
         kind: "function".to_owned(),
@@ -391,7 +391,7 @@ async fn sends_tools_and_the_tool_conversation_back() {
 
     let messages = vec![ChatMessage::user("write a file"), assistant, tool];
     let request = build_chat_request(
-        "deepseek-chat",
+        "deepseek-flash",
         ThinkingEffort::Off,
         None,
         None,
@@ -418,6 +418,11 @@ async fn sends_tools_and_the_tool_conversation_back() {
     assert_eq!(
         conversation["messages"][1]["tool_calls"][0]["function"]["name"],
         "write_file"
+    );
+    // With tools in play the API requires the thinking back, or it rejects the call.
+    assert_eq!(
+        conversation["messages"][1]["reasoning_content"],
+        serde_json::json!("let me think")
     );
     assert_eq!(conversation["messages"][2]["role"], "tool");
     assert_eq!(conversation["messages"][2]["tool_call_id"], "call_1");

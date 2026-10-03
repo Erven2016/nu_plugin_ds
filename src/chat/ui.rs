@@ -1139,7 +1139,7 @@ mod tests {
             settings: Settings::default(),
             store,
             models: vec![ModelInfo {
-                id: "deepseek-chat".to_owned(),
+                id: "deepseek-flash".to_owned(),
                 owned_by: None,
                 created: None,
             }],
@@ -1159,7 +1159,7 @@ mod tests {
     fn transcript() -> Session {
         let mut session = Session::new(
             "demo",
-            "deepseek-chat",
+            "deepseek-flash",
             crate::config::ThinkingEffort::Medium,
             Some("be concise"),
         );
@@ -1204,7 +1204,7 @@ mod tests {
         assert!(screen.contains("list the files"), "{screen}");
         assert!(screen.contains("ls ./"), "code should be shown:\n{screen}");
         assert!(
-            screen.contains("deepseek-chat"),
+            screen.contains("deepseek-flash"),
             "the model belongs in the status bar:\n{screen}"
         );
         assert!(screen.contains("think:medium"), "{screen}");
@@ -1230,7 +1230,7 @@ mod tests {
 
     #[test]
     fn keeps_the_newest_output_in_view() {
-        let mut session = Session::new("demo", "deepseek-chat", Default::default(), None);
+        let mut session = Session::new("demo", "deepseek-flash", Default::default(), None);
         for index in 0..40 {
             session.push(ChatMessage::user(format!("question {index}")));
             session.push(ChatMessage::assistant(format!("answer {index}")));
@@ -1289,7 +1289,7 @@ mod tests {
         app.sessions = vec![crate::session::SessionSummary {
             id: "abc".to_owned(),
             title: "planning".to_owned(),
-            model: "deepseek-chat".to_owned(),
+            model: "deepseek-flash".to_owned(),
             updated_at: chrono::Local::now(),
             message_count: 4,
             turns: 2,
@@ -1321,7 +1321,7 @@ mod tests {
 
     #[test]
     fn wraps_long_lines_instead_of_clipping_them() {
-        let mut session = Session::new("demo", "deepseek-chat", Default::default(), None);
+        let mut session = Session::new("demo", "deepseek-flash", Default::default(), None);
         let long: String = (0..40).map(|index| format!("word{index} ")).collect();
         session.push(ChatMessage::user(long.clone()));
         let (_dir, mut app) = app(session);
@@ -1337,7 +1337,7 @@ mod tests {
 
     #[test]
     fn formats_answers_as_markdown() {
-        let mut session = Session::new("demo", "deepseek-chat", Default::default(), None);
+        let mut session = Session::new("demo", "deepseek-flash", Default::default(), None);
         session.push(ChatMessage::assistant(
             "# Heading\n\nsome **strong** words\n\n- a bullet",
         ));
@@ -1359,7 +1359,7 @@ mod tests {
 
     #[test]
     fn markdown_can_be_turned_off() {
-        let mut session = Session::new("demo", "deepseek-chat", Default::default(), None);
+        let mut session = Session::new("demo", "deepseek-flash", Default::default(), None);
         session.push(ChatMessage::assistant("# Heading\n\nsome **strong** words"));
         let (_dir, mut app) = app(session);
         app.settings.markdown = false;
@@ -1414,7 +1414,7 @@ mod tests {
 
         let screen = text(&snapshot(&mut app, 80, 24));
         assert!(screen.contains("running run_nu ("), "{screen}");
-        assert!(screen.contains("deepseek-chat"), "{screen}");
+        assert!(screen.contains("deepseek-flash"), "{screen}");
     }
 
     #[test]
@@ -1441,7 +1441,7 @@ mod tests {
             !screen.contains("balance"),
             "no balance should be drawn for a provider without the endpoint:\n{screen}"
         );
-        assert!(screen.contains("deepseek-chat"), "{screen}");
+        assert!(screen.contains("deepseek-flash"), "{screen}");
     }
 
     #[test]
@@ -1488,7 +1488,7 @@ mod tests {
         assert!(first.contains("list the files"), "{first}");
 
         // Same number of messages, different session: the cache must not be reused.
-        let mut other = Session::new("demo", "deepseek-chat", Default::default(), None);
+        let mut other = Session::new("demo", "deepseek-flash", Default::default(), None);
         other.push(ChatMessage::user("totally"));
         other.push(ChatMessage::assistant("different"));
         other.push(ChatMessage::user("history"));
@@ -1512,7 +1512,7 @@ mod tests {
 
     #[test]
     fn ctrl_f_search_highlights_and_counts_matches() {
-        let mut session = Session::new("demo", "deepseek-chat", Default::default(), None);
+        let mut session = Session::new("demo", "deepseek-flash", Default::default(), None);
         session.push(ChatMessage::user("the quick brown fox"));
         session.push(ChatMessage::assistant("a lazy dog sleeps"));
         session.push(ChatMessage::user("the quick red fox"));
