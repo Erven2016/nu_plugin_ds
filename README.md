@@ -1,5 +1,7 @@
 # nu_plugin_ds
 
+![nu_plugin_ds chat client](docs/screenshoot.png)
+
 A [nushell](https://www.nushell.sh) plugin for talking to the [DeepSeek](https://platform.deepseek.com)
 API from your shell.
 
