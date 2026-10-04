@@ -190,6 +190,9 @@ impl Settings {
     }
 
     pub fn save(&self, paths: &ConfigPaths) -> Result<()> {
+        // Never write a file that would fail to load: an invalid settings.json would make
+        // every later command fail until it is fixed by hand.
+        self.validate()?;
         let path = paths.settings_file();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -199,7 +202,7 @@ impl Settings {
         fs::write(&path, raw).with_context(|| format!("could not write {}", path.display()))
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if !(0.0..=1.0).contains(&self.compact_ratio) {
             return Err(anyhow!(
                 "compact_ratio must be between 0 and 1, found {}",

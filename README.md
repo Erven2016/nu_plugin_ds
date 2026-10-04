@@ -82,6 +82,10 @@ blocks, lists (including task lists), quotes, rules, links and tables are format
 than shown with their markers. The renderer is streaming-safe, so half-typed markup is
 shown literally until it closes. `/markdown` toggles it for the session.
 
+The transcript border shows the conversation's session id and the working directory its
+commands run in, both in brackets (e.g. `[ab12cd34] [/home/me/project]`), so it is always
+clear which conversation is open and where `run_nu` will run.
+
 ### File tools and commands
 
 The model can ask to use three tools:
@@ -300,7 +304,18 @@ When a command exits non-zero, `cc` says so on stderr.
 > ds sessions --show planning | get usage.total_tokens
 
 > ds config                                  # resolved settings, file locations, key presence
+> ds config thinking                         # read one setting, with the values it accepts
+> ds config thinking high                    # change it (`settings.json` is rewritten)
+> ds config temperature none                 # `none` clears an optional setting
+> ds config model deepseek-v4-pro | get value
 ```
+
+`ds config <key> [value]` reads or writes a single setting. Writing validates the value
+first, so an invalid one is refused (not written) and the error names the accepted options
+for a setting that only takes a fixed set (e.g. `thinking` is one of `off`, `low`, `high`,
+`max`; the `confirm_tool_*` and `markdown`/`tools` switches take `true`/`false`). Reading a
+single setting returns `{key, value, options?, help}` — `options` is present only for a
+fixed-set setting. Run `ds config` with no argument for the whole resolved configuration.
 
 ### Where the API key lives
 

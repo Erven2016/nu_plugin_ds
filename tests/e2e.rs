@@ -437,6 +437,51 @@ fn never_prints_the_api_key() {
 
 #[test]
 #[ignore = "needs a `nu` binary on PATH"]
+fn changes_a_setting_through_nushell() {
+    let Some(harness) = Harness::new("config-set", vec![]) else {
+        return;
+    };
+
+    // Setting a value writes it and reports the change.
+    let set = harness.ok("ds config thinking high | to json --raw");
+    assert!(
+        set.contains("\"changed\":true"),
+        "the change should be reported: {set}"
+    );
+    assert!(set.contains("\"value\":\"high\""), "{set}");
+
+    // A later run reads the value back from disk, and a fixed-option setting lists what it
+    // accepts.
+    let read = harness.ok("ds config thinking | to json --raw");
+    assert!(
+        read.contains("\"value\":\"high\""),
+        "the value should persist: {read}"
+    );
+    for option in ["off", "low", "high", "max"] {
+        assert!(read.contains(option), "missing option `{option}`: {read}");
+    }
+
+    // An invalid value fails, naming the options it would accept.
+    let bad = harness.nu("ds config thinking loud");
+    assert!(!bad.success, "an invalid value should fail: {}", bad.stdout);
+    assert!(
+        bad.stderr.contains("off") && bad.stderr.contains("max"),
+        "the error should list the options: {}",
+        bad.stderr
+    );
+
+    // An unknown setting fails, listing the ones that exist.
+    let unknown = harness.nu("ds config nope 1");
+    assert!(!unknown.success, "an unknown setting should fail");
+    assert!(
+        unknown.stderr.contains("thinking"),
+        "the error should list the settings: {}",
+        unknown.stderr
+    );
+}
+
+#[test]
+#[ignore = "needs a `nu` binary on PATH"]
 fn evaluates_the_generated_command_in_this_session() {
     // The answer tells the session to change directory; `pwd` afterwards must report the
     // new one, which can only happen if the command ran on the live stack.

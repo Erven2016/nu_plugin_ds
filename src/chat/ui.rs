@@ -182,13 +182,19 @@ fn draw_transcript(frame: &mut Frame, app: &mut ChatApp, area: Rect) {
         }
     }
 
+    // The title carries the session id and the shell's working directory, so it is always
+    // clear which conversation is open and where its commands run. Both are bracketed the
+    // same way, and the path keeps its tail when the window is too narrow to show it whole.
+    let id_label = format!("[{}] ", app.session.id);
+    let used = " conversation ".chars().count() + id_label.chars().count() + "[]".chars().count();
+    let path_budget = (area.width as usize).saturating_sub(used + 1).max(8);
+    let cwd = format!("[{}] ", shorten_path(&app.context.cwd, path_budget));
+
     let block = Block::bordered()
         .title(Line::from(vec![
             Span::styled(" conversation ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("[{}] ", app.session.id),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(id_label, Style::default().fg(Color::DarkGray)),
+            Span::styled(cwd, Style::default().fg(Color::Cyan)),
         ]))
         .border_style(Style::default().fg(Color::DarkGray));
 
@@ -1165,6 +1171,18 @@ fn truncate(text: &str, max: usize) -> String {
     crate::api::types::truncate(text, max)
 }
 
+/// A path shortened for the transcript title: the tail identifies the directory, so a long
+/// path keeps its end and has the head elided.
+fn shorten_path(path: &std::path::Path, max: usize) -> String {
+    let text = path.display().to_string();
+    let len = text.chars().count();
+    if len <= max {
+        return text;
+    }
+    let tail: String = text.chars().skip(len - max.saturating_sub(1)).collect();
+    format!("…{tail}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1285,6 +1303,19 @@ mod tests {
         assert!(
             screen.contains("prompt"),
             "the input box should be titled:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn shows_the_working_directory_in_the_title() {
+        let (_dir, mut app) = app(transcript());
+        app.context.cwd = std::path::PathBuf::from("/tmp/demo");
+
+        let screen = text(&snapshot(&mut app, 100, 24));
+        assert!(screen.contains("conversation"), "{screen}");
+        assert!(
+            screen.contains("[/tmp/demo]"),
+            "the working directory belongs after the session id, in brackets:\n{screen}"
         );
     }
 
