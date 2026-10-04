@@ -955,6 +955,7 @@ impl ChatApp {
                 self.set_status("transcript cleared", StatusKind::Info);
             }
             "/new" => self.new_session((!argument.is_empty()).then_some(argument)),
+            "/rename" => self.rename_session(argument),
             "/save" => {
                 self.save_session();
                 self.set_status("session saved", StatusKind::Info);
@@ -1051,6 +1052,27 @@ impl ChatApp {
         self.approved.clear();
         let state = if self.tools_enabled { "on" } else { "off" };
         self.set_status(format!("file tools {state}"), StatusKind::Info);
+    }
+
+    fn rename_session(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.set_status("usage: /rename <new name>", StatusKind::Warn);
+            return;
+        }
+        if self.session_closed {
+            self.set_status("there is no open conversation to rename", StatusKind::Warn);
+            return;
+        }
+        self.session.name = name.to_owned();
+        self.session.touch();
+        // A rename is a deliberate change, so persist it even before the first message.
+        self.save_session_now();
+        self.refresh_sessions();
+        self.set_status(
+            format!("renamed the conversation to {name}"),
+            StatusKind::Info,
+        );
     }
 
     fn new_session(&mut self, name: Option<&str>) {
@@ -1955,6 +1977,32 @@ mod tests {
             "the cleared transcript came back: {:?}",
             reloaded.messages
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn renaming_updates_the_title_and_persists_it() {
+        let dir = temp_dir("rename");
+        let mut session = Session::new("", "deepseek-flash", ThinkingEffort::Off, None);
+        session.push(ChatMessage::user("hello"));
+        session.push(ChatMessage::assistant("hi"));
+        let id = session.id.clone();
+        let mut app = test_app(&dir, session);
+
+        assert!(app.run_slash_command("/rename planning"));
+        assert_eq!(app.session.title(), "planning");
+
+        // The new name must survive a reload and show up in the picker's list.
+        let reloaded = app.store.load(&id).unwrap();
+        assert_eq!(reloaded.title(), "planning");
+        assert!(app.sessions.iter().any(|entry| entry.title == "planning"));
+
+        // An empty name is refused with a hint instead of blanking the title.
+        assert!(app.run_slash_command("/rename   "));
+        assert_eq!(app.session.title(), "planning");
+        let status = app.status.as_ref().expect("a status").text.clone();
+        assert!(status.contains("usage"), "unexpected status: {status}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -198,8 +198,8 @@ step scrolls it into view. The prompt title reads `n/total` while searching.
 ### Slash commands
 
 `/help` · `/model [name]` · `/think [off|low|high|max]` · `/sessions` · `/new [name]` ·
-`/compact` · `/clear` · `/system [text]` · `/markdown` · `/tools` · `/regenerate` · `/models` ·
-`/balance` · `/save` · `/quit`
+`/rename <name>` · `/compact` · `/clear` · `/system [text]` · `/markdown` · `/tools` ·
+`/regenerate` · `/models` · `/balance` · `/save` · `/quit`
 
 ### Status bar
 

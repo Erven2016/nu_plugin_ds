@@ -1043,6 +1043,12 @@ fn help_lines(app: &ChatApp) -> Vec<Line<'static>> {
             key,
             description,
         ),
+        entry(
+            "/rename <name>",
+            "rename the current conversation",
+            key,
+            description,
+        ),
         entry("/compact", "summarise the history now", key, description),
         entry("/clear", "forget the current transcript", key, description),
         entry("/balance", "refresh the account balance", key, description),
