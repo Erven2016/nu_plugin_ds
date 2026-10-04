@@ -76,7 +76,7 @@ scripts. Without a terminal the command is never run."#
             .named(
                 "think",
                 SyntaxShape::String,
-                "Reasoning effort: off, low, medium or high",
+                "Reasoning effort: off, low, high or max",
                 Some('t'),
             )
             .named(

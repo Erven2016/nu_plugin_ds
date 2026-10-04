@@ -43,7 +43,7 @@ pub fn thinking_from_call(call: &EvaluatedCall) -> Result<Option<ThinkingEffort>
     };
     ThinkingEffort::parse(&raw)
         .map(Some)
-        .ok_or_else(|| anyhow!("`--think` must be one of off, low, medium or high (got `{raw}`)"))
+        .ok_or_else(|| anyhow!("`--think` must be one of off, low, high or max (got `{raw}`)"))
 }
 
 /// Where a resolved API key came from.

@@ -77,7 +77,7 @@ single-turn request: it requires `--prompt` and returns the answer as a string."
             .named(
                 "think",
                 SyntaxShape::String,
-                "Reasoning effort: off, low, medium or high",
+                "Reasoning effort: off, low, high or max",
                 Some('t'),
             )
             .named(

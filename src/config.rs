@@ -31,26 +31,28 @@ pub const REASONING_MODEL: &str = "deepseek-v4-pro";
 
 /// How much reasoning the model should spend on an answer.
 ///
-/// `Off` keeps the request on a plain chat completion. Every other level sends the
-/// OpenAI compatible `reasoning_effort` field, which DeepSeek only honours for models
-/// that support thinking. If your account rejects the field, set this back to `off`
-/// (or pick a non-thinking model).
+/// `Off` switches thinking off, and the rest are DeepSeek's `reasoning_effort` values:
+/// `low`, `high` and `max`. The API also accepts `minimal`, `medium`, `xhigh` and `ultra`,
+/// which its mapping table folds onto these levels, so they are accepted here too.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingEffort {
     #[default]
     Off,
+    #[serde(alias = "minimal")]
     Low,
-    Medium,
+    #[serde(alias = "medium", alias = "xhigh")]
     High,
+    #[serde(alias = "ultra")]
+    Max,
 }
 
 impl ThinkingEffort {
     pub const ALL: [ThinkingEffort; 4] = [
         ThinkingEffort::Off,
         ThinkingEffort::Low,
-        ThinkingEffort::Medium,
         ThinkingEffort::High,
+        ThinkingEffort::Max,
     ];
 
     /// The value sent to the API, or `None` when thinking should be disabled.
@@ -58,8 +60,8 @@ impl ThinkingEffort {
         match self {
             ThinkingEffort::Off => None,
             ThinkingEffort::Low => Some("low"),
-            ThinkingEffort::Medium => Some("medium"),
             ThinkingEffort::High => Some("high"),
+            ThinkingEffort::Max => Some("max"),
         }
     }
 
@@ -68,26 +70,26 @@ impl ThinkingEffort {
         match self {
             ThinkingEffort::Off => "off",
             ThinkingEffort::Low => "low",
-            ThinkingEffort::Medium => "medium",
             ThinkingEffort::High => "high",
+            ThinkingEffort::Max => "max",
         }
     }
 
     pub fn next(self) -> Self {
         match self {
             ThinkingEffort::Off => ThinkingEffort::Low,
-            ThinkingEffort::Low => ThinkingEffort::Medium,
-            ThinkingEffort::Medium => ThinkingEffort::High,
-            ThinkingEffort::High => ThinkingEffort::Off,
+            ThinkingEffort::Low => ThinkingEffort::High,
+            ThinkingEffort::High => ThinkingEffort::Max,
+            ThinkingEffort::Max => ThinkingEffort::Off,
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "off" | "none" | "false" | "0" => Some(ThinkingEffort::Off),
-            "low" | "minimal" => Some(ThinkingEffort::Low),
-            "medium" | "mid" | "default" => Some(ThinkingEffort::Medium),
-            "high" | "max" => Some(ThinkingEffort::High),
+            "off" | "none" | "false" | "0" | "disabled" => Some(ThinkingEffort::Off),
+            "minimal" | "low" => Some(ThinkingEffort::Low),
+            "medium" | "mid" | "default" | "high" | "xhigh" => Some(ThinkingEffort::High),
+            "max" | "ultra" => Some(ThinkingEffort::Max),
             _ => None,
         }
     }
@@ -372,5 +374,27 @@ mod tests {
             ..Settings::default()
         };
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn thinking_levels_match_the_api() {
+        assert_eq!(ThinkingEffort::Low.as_api(), Some("low"));
+        assert_eq!(ThinkingEffort::High.as_api(), Some("high"));
+        assert_eq!(ThinkingEffort::Max.as_api(), Some("max"));
+        assert_eq!(ThinkingEffort::Off.as_api(), None);
+
+        // The API's extra spellings fold onto the three real effort levels.
+        assert_eq!(ThinkingEffort::parse("minimal"), Some(ThinkingEffort::Low));
+        assert_eq!(ThinkingEffort::parse("medium"), Some(ThinkingEffort::High));
+        assert_eq!(ThinkingEffort::parse("xhigh"), Some(ThinkingEffort::High));
+        assert_eq!(ThinkingEffort::parse("ultra"), Some(ThinkingEffort::Max));
+        assert_eq!(ThinkingEffort::parse("nope"), None);
+    }
+
+    #[test]
+    fn an_old_medium_setting_still_loads() {
+        // `medium` used to be its own level; it now folds onto `high`.
+        let settings: Settings = serde_json::from_str(r#"{"thinking": "medium"}"#).unwrap();
+        assert_eq!(settings.thinking, ThinkingEffort::High);
     }
 }

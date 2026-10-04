@@ -992,7 +992,7 @@ impl ChatApp {
                     );
                 } else {
                     self.set_status(
-                        format!("`{argument}` is not a thinking level (off/low/medium/high)"),
+                        format!("`{argument}` is not a thinking level (off/low/high/max)"),
                         StatusKind::Warn,
                     );
                 }

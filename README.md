@@ -150,7 +150,7 @@ denylist.**
 | `Ctrl+X` | quit |
 | `Ctrl+D` | quit when the prompt is empty; otherwise delete the character under the cursor |
 | `Ctrl+O` | switch model (the list comes from `GET /models`) |
-| `Ctrl+T` | switch thinking level (`off` / `low` / `medium` / `high`) |
+| `Ctrl+T` | switch thinking level (`off` / `low` / `high` / `max`) |
 | `Ctrl+B` | browse sessions (see below) |
 | `Ctrl+N` | start a new session |
 | `Ctrl+R` | regenerate the last answer |
@@ -197,7 +197,7 @@ step scrolls it into view. The prompt title reads `n/total` while searching.
 
 ### Slash commands
 
-`/help` · `/model [name]` · `/think [off|low|medium|high]` · `/sessions` · `/new [name]` ·
+`/help` · `/model [name]` · `/think [off|low|high|max]` · `/sessions` · `/new [name]` ·
 `/compact` · `/clear` · `/system [text]` · `/markdown` · `/tools` · `/regenerate` · `/models` ·
 `/balance` · `/save` · `/quit`
 
@@ -368,7 +368,7 @@ Settings live in `settings.json` in the plugin's config directory
 | --- | --- |
 | `base_url` | API root, without `/v1`. `$env.DEEPSEEK_BASE_URL` overrides it. |
 | `model` | model used when a session does not pin one |
-| `thinking` | `off`, `low`, `medium` or `high` |
+| `thinking` | `off`, `low`, `high` or `max` (`minimal`, `medium`, `xhigh` and `ultra` are accepted aliases) |
 | `temperature`, `max_tokens` | passed to the API; temperature is ignored while thinking is on |
 | `context_limit` | local token budget that triggers compaction; `null` (the default) uses the model's window (1M) |
 | `compact_ratio` | fraction of the effective context limit that triggers compaction |
@@ -397,7 +397,7 @@ Environment variables: `DEEPSEEK_API_KEY` (optional if a key is stored),
   works as a single request.
 * **Thinking mode is on by default in the current models.** `thinking: off` is sent as an
   explicit `{"thinking": {"type": "disabled"}}` switch, because the API's own default is
-  on; `low`, `medium` and `high` are sent as `reasoning_effort`. While thinking is on the
+  on; `low`, `high` and `max` are sent as `reasoning_effort`. While thinking is on the
   API ignores `temperature`, so it only takes effect with thinking off. The thinking from
   earlier turns is echoed back to the API, which requires it once the request carries
   tools.

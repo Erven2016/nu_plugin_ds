@@ -1013,7 +1013,7 @@ fn help_lines(app: &ChatApp) -> Vec<Line<'static>> {
         entry("/model [name]", "show or set the model", key, description),
         entry(
             "/think [level]",
-            "show or set off/low/medium/high",
+            "show or set off/low/high/max",
             key,
             description,
         ),
@@ -1181,7 +1181,7 @@ mod tests {
         let mut session = Session::new(
             "demo",
             "deepseek-flash",
-            crate::config::ThinkingEffort::Medium,
+            crate::config::ThinkingEffort::High,
             Some("be concise"),
         );
         session.push(ChatMessage::user("list the files"));
@@ -1228,7 +1228,7 @@ mod tests {
             screen.contains("deepseek-flash"),
             "the model belongs in the status bar:\n{screen}"
         );
-        assert!(screen.contains("think:medium"), "{screen}");
+        assert!(screen.contains("think:high"), "{screen}");
         assert!(
             screen.contains("ctx"),
             "the context gauge belongs in the status bar:\n{screen}"
