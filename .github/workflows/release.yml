@@ -1,0 +1,140 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Keep building the remaining targets even if one of them fails.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            os: linux
+            bin: nu_plugin_ds
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            os: linux
+            bin: nu_plugin_ds
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            os: macos
+            bin: nu_plugin_ds
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            os: macos
+            bin: nu_plugin_ds
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            os: windows
+            bin: nu_plugin_ds.exe
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            os: windows
+            bin: nu_plugin_ds.exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="nu_plugin_ds-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${name}/"
+          cp README.md LICENSE "dist/${name}/"
+          ( cd "dist/${name}" && tar -czf "../${name}.tar.gz" \
+              "${{ matrix.bin }}" README.md LICENSE )
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $name = "nu_plugin_ds-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/$name/"
+          Copy-Item README.md, LICENSE "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history and tags are needed to diff against the previous tag.
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="${GITHUB_REF_NAME}"
+          if prev="$(git describe --tags --abbrev=0 "${current}^" 2>/dev/null)"; then
+            echo "Collecting commits ${prev}..${current}"
+            range="${prev}..${current}"
+            heading="Changes since ${prev}"
+          else
+            echo "No previous tag found; listing all commits"
+            range="${current}"
+            heading="All commits"
+          fi
+          {
+            printf '## %s\n\n' "${heading}"
+            git log "${range}" --pretty=format:'- %s'
+            printf '\n'
+          } > RELEASE_NOTES.md
+          echo "----- release notes -----"
+          cat RELEASE_NOTES.md
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: false
+          generate_release_notes: false
