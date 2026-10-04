@@ -19,6 +19,10 @@ use super::tools;
 /// Number of spaces content is indented by under its role header.
 const INDENT: usize = 2;
 
+/// How much room the status bar must have left after the context gauge before a diagnostic
+/// status message is worth drawing.
+const MIN_STATUS_WIDTH: u16 = 24;
+
 /// Draw one frame of the chat UI.
 pub fn draw(frame: &mut Frame, app: &mut ChatApp) {
     let area = frame.area();
@@ -668,20 +672,40 @@ fn draw_status(frame: &mut Frame, app: &ChatApp, area: Rect) {
         },
         area,
     );
+    let gauge_width = gauge.chars().count() as u16;
     let gauge_line = Line::from(Span::styled(gauge, Style::default().fg(gauge_color(ratio))));
+    // Whatever is left of the row after the gauge is what a status message can use. If there
+    // is too little of it, the gauge — the important information — keeps the whole row.
+    let available = row2.width.saturating_sub(gauge_width);
     match &app.status {
         None => frame.render_widget(Paragraph::new(gauge_line), row2),
         Some(status) => {
             // Status messages (a compaction, a switched model, a failed tool) would otherwise
-            // be written but never drawn, making commands like `/compact` look inert. Show
-            // them right-aligned, capped to half the row so the context gauge stays readable.
+            // be written but never drawn, making commands like `/compact` look inert. Draw
+            // them right-aligned. A hint is only worth showing in full and is dropped when
+            // the window is too narrow; diagnostics may be truncated, so they just need a
+            // minimum amount of room.
             let color = match status.kind {
+                StatusKind::Hint => Color::DarkGray,
                 StatusKind::Info => Color::Gray,
                 StatusKind::Warn => Color::Yellow,
                 StatusKind::Error => Color::Red,
             };
-            let budget = (row2.width as usize / 2).max(8);
-            let text = truncate(&status.text, budget);
+            let (needed, budget) = match status.kind {
+                StatusKind::Hint => {
+                    let full = status.text.chars().count() as u16;
+                    (full, full as usize)
+                }
+                _ => (
+                    MIN_STATUS_WIDTH,
+                    available.saturating_sub(1).min(row2.width / 2) as usize,
+                ),
+            };
+            if available < needed {
+                frame.render_widget(Paragraph::new(gauge_line), row2);
+                return;
+            }
+            let text = truncate(&status.text, budget.max(1));
             let width = text.chars().count() as u16;
             let [gauge_area, status_area] =
                 Layout::horizontal([Constraint::Min(0), Constraint::Length(width)]).areas(row2);
@@ -1272,7 +1296,7 @@ mod tests {
             kind: StatusKind::Info,
         });
 
-        let screen = text(&snapshot(&mut app, 100, 24));
+        let screen = text(&snapshot(&mut app, 160, 24));
         assert!(
             screen.contains("compacted 6 messages"),
             "the status message must be drawn:\n{screen}"
@@ -1280,6 +1304,35 @@ mod tests {
         assert!(
             screen.contains("ctx"),
             "the context gauge must still share the row:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn hides_the_key_hint_when_the_window_is_narrow() {
+        let (_dir, mut app) = app(transcript());
+        app.status = Some(Status {
+            text: "Ctrl+O model · Ctrl+T thinking · Ctrl+B sessions · Ctrl+/ help · Ctrl+X quit"
+                .to_owned(),
+            kind: StatusKind::Hint,
+        });
+
+        // Too narrow to show the hint without squeezing the gauge: the hint is dropped.
+        let narrow = text(&snapshot(&mut app, 80, 24));
+        assert!(
+            !narrow.contains("Ctrl+O"),
+            "the hint must be hidden when the window is narrow:\n{narrow}"
+        );
+        assert!(narrow.contains("ctx"), "the gauge must stay:\n{narrow}");
+
+        // Wide enough for both: the hint is shown in full.
+        let wide = text(&snapshot(&mut app, 200, 24));
+        assert!(
+            wide.contains("Ctrl+O"),
+            "the hint should show when there is room:\n{wide}"
+        );
+        assert!(
+            wide.contains("Ctrl+X quit"),
+            "the hint must be complete:\n{wide}"
         );
     }
 

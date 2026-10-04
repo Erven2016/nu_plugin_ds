@@ -112,6 +112,9 @@ pub enum Overlay {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusKind {
+    /// A low-priority hint (the startup key reminders). The status bar drops it when the
+    /// window is too narrow to show it in full, so it never crowds the context gauge.
+    Hint,
     Info,
     Warn,
     Error,
@@ -350,7 +353,7 @@ impl ChatApp {
 
         self.set_status(
             "Ctrl+O model · Ctrl+T thinking · Ctrl+B sessions · Ctrl+/ help · Ctrl+X quit",
-            StatusKind::Info,
+            StatusKind::Hint,
         );
         self.refresh_balance(false);
 

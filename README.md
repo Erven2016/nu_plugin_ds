@@ -213,7 +213,9 @@ The second line reports the context budget: an estimated usage bar against the m
 context window (the estimate is local, since the plugin never sees a tokenizer), the
 percentage and tokens in use, the session totals reported by the API (`↑` prompt, `↓`
 completion, `Σ` total), the compaction ratio in force (`compact:75%`) and the prompt cache
-hit rate (`cache:62%`).
+hit rate (`cache:62%`). Short status messages — a compaction result, a warning — appear at
+the right of this line; on a narrow terminal the low-priority key hint is dropped so the
+gauge keeps its room.
 
 ## Context compaction
 
