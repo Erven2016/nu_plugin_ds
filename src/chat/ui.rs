@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use crate::api::{ChatMessage, Role, ToolCall, Usage};
 use crate::token::{estimate_messages, estimate_tokens, format_tokens};
 
-use super::app::{Balance, ChatApp, Overlay, Phase};
+use super::app::{Balance, ChatApp, Overlay, Phase, StatusKind};
 use super::markdown;
 use super::tools;
 
@@ -660,20 +660,39 @@ fn draw_status(frame: &mut Frame, app: &ChatApp, area: Rect) {
             frame.render_widget(Paragraph::new(Line::from(left)), row1);
         }
     }
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            gauge,
-            Style::default().fg(gauge_color(ratio)),
-        ))),
-        clamp(
-            Rect {
-                y: area.y + 1,
-                height: 1,
-                ..area
-            },
-            area,
-        ),
+    let row2 = clamp(
+        Rect {
+            y: area.y + 1,
+            height: 1,
+            ..area
+        },
+        area,
     );
+    let gauge_line = Line::from(Span::styled(gauge, Style::default().fg(gauge_color(ratio))));
+    match &app.status {
+        None => frame.render_widget(Paragraph::new(gauge_line), row2),
+        Some(status) => {
+            // Status messages (a compaction, a switched model, a failed tool) would otherwise
+            // be written but never drawn, making commands like `/compact` look inert. Show
+            // them right-aligned, capped to half the row so the context gauge stays readable.
+            let color = match status.kind {
+                StatusKind::Info => Color::Gray,
+                StatusKind::Warn => Color::Yellow,
+                StatusKind::Error => Color::Red,
+            };
+            let budget = (row2.width as usize / 2).max(8);
+            let text = truncate(&status.text, budget);
+            let width = text.chars().count() as u16;
+            let [gauge_area, status_area] =
+                Layout::horizontal([Constraint::Min(0), Constraint::Length(width)]).areas(row2);
+            frame.render_widget(Paragraph::new(gauge_line), gauge_area);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(text, Style::default().fg(color))))
+                    .alignment(Alignment::Right),
+                status_area,
+            );
+        }
+    }
 }
 
 fn gauge_color(ratio: f32) -> Color {
@@ -1120,7 +1139,7 @@ fn truncate(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::api::{ChatMessage, DeepSeekClient, ModelInfo};
-    use crate::chat::app::{ChatApp, ChatSetup, Phase};
+    use crate::chat::app::{ChatApp, ChatSetup, Phase, Status, StatusKind};
     use crate::config::Settings;
     use crate::session::{Session, SessionStore};
     use ratatui::Terminal;
@@ -1236,6 +1255,25 @@ mod tests {
         assert!(
             screen.contains("prompt"),
             "the input box should be titled:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn draws_status_messages_and_keeps_the_gauge() {
+        let (_dir, mut app) = app(transcript());
+        app.status = Some(Status {
+            text: "compacted 6 messages into a summary".to_owned(),
+            kind: StatusKind::Info,
+        });
+
+        let screen = text(&snapshot(&mut app, 100, 24));
+        assert!(
+            screen.contains("compacted 6 messages"),
+            "the status message must be drawn:\n{screen}"
+        );
+        assert!(
+            screen.contains("ctx"),
+            "the context gauge must still share the row:\n{screen}"
         );
     }
 

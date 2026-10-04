@@ -15,7 +15,7 @@ use tokio::sync::Notify;
 
 use crate::api::{
     BalanceInfo, BalanceProbe, ChatMessage, ChatRequest, DeepSeekClient, ModelInfo, StreamEvent,
-    ToolCall, Usage, WireMessage,
+    ToolCall, Usage,
 };
 use crate::config::{Settings, ThinkingEffort};
 use crate::session::{Session, SessionStore, SessionSummary};
@@ -1277,8 +1277,14 @@ impl ChatApp {
 
     /// Like [`ChatApp::compaction_plan`], but always yields something when there is
     /// anything at all to compress (used by `/compact`).
+    ///
+    /// It has to keep the same number of recent messages as [`ChatApp::apply_compaction`],
+    /// otherwise the summary is built from a wider range than the one that is actually
+    /// replaced: the surplus messages are then both summarised and kept verbatim (so the
+    /// history can even grow), and the effect looks like the command did nothing.
     fn forced_compaction_plan(&self) -> Option<(Vec<ChatMessage>, usize)> {
-        self.session.compaction_plan(2)
+        self.session
+            .compaction_plan(self.settings.keep_recent_messages.max(2))
     }
 
     fn plan_keeping(&self, keep: usize) -> Option<(Vec<ChatMessage>, usize)> {
@@ -1331,6 +1337,7 @@ impl ChatApp {
 
     fn apply_compaction(&mut self, summary: String, removed: usize, usage: Option<Usage>) {
         let keep = self.settings.keep_recent_messages.max(2);
+        let before = estimate_messages(&self.session.messages);
         self.session.apply_summary(&summary, keep);
         if let Some(usage) = usage {
             self.session.usage.merge(&usage);
@@ -1339,10 +1346,10 @@ impl ChatApp {
         self.scroll = 0;
         self.stick_to_bottom = true;
 
+        let after = estimate_messages(&self.session.messages);
         self.set_status(
             format!(
-                "compacted {removed} messages into a summary ({} tokens left in the estimate)",
-                estimate_messages(&self.session.messages)
+                "compacted {removed} messages into a summary (estimate ~{before} → ~{after} tokens)"
             ),
             StatusKind::Info,
         );
@@ -1781,30 +1788,7 @@ pub(crate) async fn summarise(
         );
     }
 
-    let request = ChatRequest::new(
-        model,
-        vec![
-            WireMessage {
-                role: "system".to_owned(),
-                content: system,
-                reasoning_content: None,
-                tool_calls: None,
-                tool_call_id: None,
-            },
-            WireMessage {
-                role: "user".to_owned(),
-                content: format!(
-                    "Summarise this conversation excerpt so that it can replace the original \
-                     messages as context:\n\n{transcript}"
-                ),
-                reasoning_content: None,
-                tool_calls: None,
-                tool_call_id: None,
-            },
-        ],
-    )
-    .max_tokens(Some(1024))
-    .temperature(Some(0.2));
+    let request = summarise_request(model, system, &transcript);
 
     let response = client.complete(&request).await?;
     let summary = response.text();
@@ -1812,6 +1796,29 @@ pub(crate) async fn summarise(
         anyhow::bail!("the model returned an empty summary");
     }
     Ok((summary, response.usage))
+}
+
+/// The request that compresses a transcript into a summary.
+///
+/// Thinking is on by default, but this request must not leave it that way: with a small
+/// token cap the model can spend the whole budget on hidden reasoning and emit no content,
+/// which failed compaction with "the model returned an empty summary". Summarising needs no
+/// reasoning, so it is disabled explicitly and the cap leaves room for a dense summary.
+fn summarise_request(model: &str, system: String, transcript: &str) -> ChatRequest {
+    crate::api::build_chat_request(
+        model,
+        ThinkingEffort::Off,
+        Some(4096),
+        Some(0.2),
+        &[
+            ChatMessage::system(system),
+            ChatMessage::user(format!(
+                "Summarise this conversation excerpt so that it can replace the original \
+                 messages as context:\n\n{transcript}"
+            )),
+        ],
+        false,
+    )
 }
 
 /// The first line of a tool result, for the one-line status message.
@@ -1950,6 +1957,61 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compacting_replaces_exactly_what_the_plan_summarised() {
+        let dir = temp_dir("compact");
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
+        for i in 0..12 {
+            session.push(ChatMessage::user(format!("u{i}")));
+            session.push(ChatMessage::assistant(format!("a{i}")));
+        }
+        let mut app = test_app(&dir, session);
+
+        // The summariser must be handed everything except the tail that will be kept.
+        let (to_summarise, removed) = app.forced_compaction_plan().expect("a plan");
+        let keep = app.settings.keep_recent_messages.max(2);
+        assert_eq!(
+            app.session.messages.len() - to_summarise.len(),
+            keep,
+            "the plan and the compaction must agree on how much to keep"
+        );
+        assert_eq!(removed, to_summarise.len());
+
+        app.apply_compaction("the gist".to_owned(), removed, None);
+
+        // One summary plus the kept tail: nothing that was summarised is also kept verbatim.
+        assert_eq!(app.session.messages.len(), keep + 1);
+        assert_eq!(app.session.compactions, 1);
+        let status = app.status.as_ref().expect("a status").text.clone();
+        assert!(status.contains("compacted"), "unexpected status: {status}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_summariser_turns_thinking_off_and_leaves_room() {
+        let request = summarise_request("deepseek-v4-pro", "be dense".to_owned(), "u: hi");
+        let json = serde_json::to_value(&request).unwrap();
+
+        // Thinking on by default can swallow the whole token budget and return no content.
+        assert_eq!(json["thinking"]["type"], serde_json::json!("disabled"));
+        assert_eq!(json["stream"], serde_json::json!(false));
+        assert!(
+            json["max_tokens"].as_u64().is_some_and(|cap| cap >= 2048),
+            "the cap must leave room for a summary: {json}"
+        );
+        let body = request
+            .messages
+            .iter()
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains("u: hi"),
+            "the transcript must reach the model: {body}"
+        );
     }
 
     #[test]
