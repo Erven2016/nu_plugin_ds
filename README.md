@@ -164,7 +164,8 @@ denylist.**
 | `Ctrl+Home` / `Ctrl+End` | jump to the top / bottom of the transcript |
 | `PgUp` / `PgDn`, `Alt+↑` / `Alt+↓` | scroll the transcript |
 | mouse wheel | scroll the transcript a few lines up or down |
-| left-button drag | select transcript text; the selection is copied to the clipboard when the button is released |
+| left-button drag | select transcript text (it stays selected; nothing is copied yet) |
+| right-click | open a context menu over the selection — `Copy` or `Deselect` (`↑`/`↓` + `Enter`, `c` to copy, `Esc` to close; an item can also be clicked) |
 | `Up` / `Down` | move in the prompt; on the first line they browse the input history |
 | `Left` / `Right`, `Home` / `End`, `Delete`, `Backspace` | move in or edit the prompt |
 | `Ctrl+A` / `Ctrl+E` | jump to the start / end of the line |

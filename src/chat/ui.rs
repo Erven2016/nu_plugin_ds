@@ -14,7 +14,9 @@ use crate::session::Session;
 use crate::token::{estimate_messages, format_tokens};
 use unicode_width::UnicodeWidthChar;
 
-use super::app::{Balance, ChatApp, Overlay, Phase, Selection, StatusKind, TranscriptView};
+use super::app::{
+    Balance, ChatApp, MENU_ITEMS, Overlay, Phase, Selection, StatusKind, TranscriptView,
+};
 use super::markdown;
 use super::tools;
 
@@ -56,7 +58,11 @@ pub fn draw(frame: &mut Frame, app: &mut ChatApp) {
     draw_status(frame, app, clamp(status_area, area));
 
     if let Some(overlay) = app.overlay.clone() {
-        draw_overlay(frame, app, overlay, area);
+        app.menu_area = None;
+        match overlay {
+            Overlay::Menu { x, y, index } => draw_menu(frame, app, x, y, index, area),
+            other => draw_overlay(frame, app, other, area),
+        }
     }
 }
 
@@ -1113,6 +1119,8 @@ fn draw_overlay(frame: &mut Frame, app: &ChatApp, overlay: Overlay, area: Rect) 
             ))],
             None,
         ),
+        // The context menu is drawn at its click by `draw_menu`, not through this panel.
+        Overlay::Menu { .. } => unreachable!("the context menu is drawn by draw_menu"),
     };
 
     let mut lines = lines;
@@ -1186,6 +1194,53 @@ fn tool_call_lines(preview: &tools::Preview) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+/// The right-click context menu: a small panel at the click, clamped on screen, listing the
+/// actions for the current selection.
+fn draw_menu(frame: &mut Frame, app: &mut ChatApp, x: u16, y: u16, index: usize, area: Rect) {
+    let width = MENU_ITEMS
+        .iter()
+        .map(|item| item.chars().count())
+        .max()
+        .unwrap_or(0) as u16
+        + 4;
+    let height = MENU_ITEMS.len() as u16 + 2;
+    let panel = clamp(
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        },
+        area,
+    );
+
+    let lines: Vec<Line<'static>> = MENU_ITEMS
+        .iter()
+        .enumerate()
+        .map(|(position, item)| {
+            Line::from(Span::styled(
+                format!(" {item} "),
+                if position == index {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+            ))
+        })
+        .collect();
+
+    frame.render_widget(Clear, panel);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(Block::bordered().border_style(Style::default().fg(Color::Cyan))),
+        panel,
+    );
+    app.menu_area = Some((panel.x, panel.y, panel.width, panel.height));
 }
 
 fn draw_panel(
@@ -1262,6 +1317,14 @@ fn help_lines(app: &ChatApp) -> Vec<Line<'static>> {
         entry(
             "Up/Down",
             "move in the prompt, or browse history",
+            key,
+            description,
+        ),
+        entry("mouse wheel", "scroll the transcript", key, description),
+        entry("left-drag", "select transcript text", key, description),
+        entry(
+            "right-click",
+            "copy the selection (or deselect)",
             key,
             description,
         ),

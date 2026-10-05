@@ -117,7 +117,18 @@ pub enum Overlay {
         total: usize,
         preview: tools::Preview,
     },
+    /// A context menu opened with the right mouse button, near where it was clicked.
+    Menu {
+        /// Requested top-left corner in screen cells; the renderer clamps it on screen.
+        x: u16,
+        y: u16,
+        /// The highlighted item.
+        index: usize,
+    },
 }
+
+/// The entries of the right-click context menu, in order.
+pub(super) const MENU_ITEMS: [&str; 2] = ["Copy", "Deselect"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusKind {
@@ -324,6 +335,9 @@ pub struct ChatApp {
     pub(super) selection: Option<Selection>,
     /// Where the transcript was drawn last frame, used to map mouse events back to lines.
     pub(super) transcript_view: TranscriptView,
+    /// Where the context menu was drawn last frame, as `(x, y, width, height)`, so a click
+    /// can be matched to a menu item. `None` when no menu is showing.
+    pub(super) menu_area: Option<(u16, u16, u16, u16)>,
     /// Lines scrolled up from the bottom of the transcript.
     pub(super) scroll: usize,
     /// The largest useful `scroll`, from the last frame. Paging up at the top must not add
@@ -381,6 +395,7 @@ impl ChatApp {
             transcript: ui::TranscriptCache::new(),
             selection: None,
             transcript_view: TranscriptView::default(),
+            menu_area: None,
             scroll: 0,
             scroll_max: 0,
             stick_to_bottom: true,
@@ -622,11 +637,15 @@ impl ChatApp {
         }
     }
 
-    /// The mouse drives two things: the wheel scrolls the transcript a few lines per notch,
-    /// and a left-button drag selects a run of text (copied to the clipboard on release).
-    /// Every other mouse event is ignored, and while an overlay is open the mouse is ignored
-    /// entirely, since the overlay owns the input.
+    /// The mouse drives three things: the wheel scrolls the transcript a few lines per notch,
+    /// a left-button drag selects a run of text, and the right button opens a context menu
+    /// over the selection (copy / deselect). While any other overlay is open the mouse is
+    /// ignored, since the overlay owns the input.
     fn on_mouse(&mut self, mouse: MouseEvent) {
+        if let Some(Overlay::Menu { index, .. }) = self.overlay.clone() {
+            self.on_menu_mouse(mouse, index);
+            return;
+        }
         if self.overlay.is_some() {
             return;
         }
@@ -640,7 +659,92 @@ impl ChatApp {
                 self.extend_selection(mouse.column, mouse.row)
             }
             MouseEventKind::Up(MouseButton::Left) => self.end_selection(),
+            MouseEventKind::Down(MouseButton::Right) => self.open_menu(mouse.column, mouse.row),
             _ => {}
+        }
+    }
+
+    /// Drive the open context menu with the mouse: a left click activates the item under the
+    /// cursor (or closes the menu when it lands outside), any other button closes it.
+    fn on_menu_mouse(&mut self, mouse: MouseEvent, index: usize) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                match self.menu_item_at(mouse.column, mouse.row) {
+                    Some(item) => self.run_menu_item(item),
+                    None => self.overlay = None,
+                }
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                // A second right click moves the menu rather than stacking another one.
+                let (x, y) = (mouse.column, mouse.row);
+                self.overlay = Some(Overlay::Menu { x, y, index });
+            }
+            _ => {}
+        }
+    }
+
+    /// Open the context menu at a click, when there is a selection to act on.
+    fn open_menu(&mut self, column: u16, row: u16) {
+        if self.selection.is_none() {
+            return;
+        }
+        self.overlay = Some(Overlay::Menu {
+            x: column,
+            y: row,
+            index: 0,
+        });
+    }
+
+    /// The menu item under a screen cell, using the rectangle the renderer published.
+    fn menu_item_at(&self, column: u16, row: u16) -> Option<usize> {
+        let (x, y, width, height) = self.menu_area?;
+        // The border occupies the first and last column/row of the panel.
+        if column <= x || column >= x + width.saturating_sub(1) {
+            return None;
+        }
+        if row <= y || row >= y + height.saturating_sub(1) {
+            return None;
+        }
+        let item = (row - y - 1) as usize;
+        (item < MENU_ITEMS.len()).then_some(item)
+    }
+
+    /// Act on a context-menu entry and close the menu.
+    fn run_menu_item(&mut self, index: usize) {
+        self.overlay = None;
+        match MENU_ITEMS.get(index) {
+            Some(&"Copy") => {
+                if !self.copy_selection() {
+                    self.set_status("nothing is selected", StatusKind::Warn);
+                }
+            }
+            Some(&"Deselect") => {
+                self.selection = None;
+                self.set_status("selection cleared", StatusKind::Info);
+            }
+            _ => {}
+        }
+    }
+
+    /// Copy the current selection to the clipboard, reporting whether there was one.
+    fn copy_selection(&mut self) -> bool {
+        let Some(selection) = self.selection else {
+            return false;
+        };
+        match self
+            .selected_text(&selection)
+            .filter(|text| !text.is_empty())
+        {
+            Some(text) => {
+                let chars = text.chars().count();
+                copy_to_clipboard(&text);
+                self.set_status(
+                    format!("copied {chars} characters to the clipboard"),
+                    StatusKind::Info,
+                );
+                true
+            }
+            None => false,
         }
     }
 
@@ -671,7 +775,8 @@ impl ChatApp {
         }
     }
 
-    /// Finish the drag: copy the selected text, or just drop an empty selection.
+    /// Finish the drag. The selection is kept (and hinted at) rather than copied: copying is
+    /// a deliberate action, taken from the right-click menu.
     fn end_selection(&mut self) {
         let Some(selection) = self.selection.as_mut() else {
             return;
@@ -680,21 +785,8 @@ impl ChatApp {
         let selection = *selection;
         if selection.normalized().0 == selection.normalized().1 {
             self.selection = None;
-            return;
-        }
-        match self
-            .selected_text(&selection)
-            .filter(|text| !text.is_empty())
-        {
-            Some(text) => {
-                let chars = text.chars().count();
-                copy_to_clipboard(&text);
-                self.set_status(
-                    format!("copied {chars} characters to the clipboard"),
-                    StatusKind::Info,
-                );
-            }
-            None => self.selection = None,
+        } else {
+            self.set_status("text selected — right-click to copy", StatusKind::Info);
         }
     }
 
@@ -1110,6 +1202,28 @@ impl ChatApp {
                 }
                 _ => {}
             },
+            Overlay::Menu { x, y, mut index } => {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.overlay = None;
+                        return;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => index = index.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        index = (index + 1).min(MENU_ITEMS.len().saturating_sub(1))
+                    }
+                    KeyCode::Char('c') => {
+                        self.run_menu_item(0);
+                        return;
+                    }
+                    KeyCode::Enter => {
+                        self.run_menu_item(index);
+                        return;
+                    }
+                    _ => {}
+                }
+                self.overlay = Some(Overlay::Menu { x, y, index });
+            }
         }
     }
 
@@ -2658,8 +2772,42 @@ mod tests {
             MouseEventKind::Up(MouseButton::Left),
             view.x + start + 5,
         ));
+        app.handle(event(
+            MouseEventKind::Up(MouseButton::Left),
+            view.x + start + 5,
+        ));
         let selection = app.selection.expect("the selection survives the release");
         assert_eq!(app.selected_text(&selection).as_deref(), Some("hello"));
+
+        // Releasing the button does not copy by itself: it only points at the menu.
+        let status = app.status.as_ref().expect("a hint").text.clone();
+        assert!(
+            status.contains("right-click"),
+            "unexpected status: {status}"
+        );
+
+        // The right button opens the context menu, and Enter runs the highlighted item.
+        app.handle(event(
+            MouseEventKind::Down(MouseButton::Right),
+            view.x + start,
+        ));
+        assert!(
+            matches!(app.overlay, Some(Overlay::Menu { .. })),
+            "a right click should open the context menu"
+        );
+        app.handle(AppEvent::Term(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+        assert!(app.overlay.is_none(), "the menu closes after the action");
+        let status = app.status.as_ref().expect("a status").text.clone();
+        assert!(status.contains("copied"), "unexpected status: {status}");
+        assert_eq!(
+            app.selected_text(app.selection.as_ref().expect("kept"))
+                .as_deref(),
+            Some("hello"),
+            "copying keeps the selection"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
