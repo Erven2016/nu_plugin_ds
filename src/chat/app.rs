@@ -2113,12 +2113,15 @@ impl ChatApp {
     }
 
     /// Make sure every tool call in the history has an answer before it is sent: the API
-    /// rejects a conversation where one is missing, and a turn can end early.
+    /// rejects a conversation where one is missing, and a turn can end early. It also drops a
+    /// `tool` result left without its call (a compaction boundary or a cross-window merge can
+    /// leave one behind), which the API rejects the same way.
     fn repair_history(&mut self) {
         for call in self.session.unanswered_tool_calls() {
             let outcome = tools::Outcome::failed("not run: this call was never executed");
             self.record_tool_result(&call, &outcome);
         }
+        self.session.drop_orphan_tool_results();
     }
 
     fn cancel_stream(&mut self) {
@@ -2715,6 +2718,10 @@ mod tests {
                 arguments: r#"{"path":"x"}"#.to_owned(),
             },
         };
+        // The assistant asked for the call; the API pairs a `tool` result with this message.
+        let mut assistant = ChatMessage::assistant("");
+        assistant.tool_calls = Some(vec![call.clone()]);
+        app.session.push(assistant);
         app.begin_tool_round(vec![call]);
 
         // The call has to be answered, or the API would reject the history...

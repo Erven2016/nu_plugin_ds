@@ -170,23 +170,26 @@ impl Session {
 
     /// The messages a compaction should replace, and how many that is.
     ///
-    /// The system prompt and the most recent `keep` messages are always left alone.
+    /// The system prompt and the most recent `keep` messages are always left alone (the
+    /// split is moved earlier when `keep` would cut a tool exchange in half).
     pub fn compaction_plan(&self, keep: usize) -> Option<(Vec<ChatMessage>, usize)> {
         let keep = keep.max(2);
         let start = usize::from(self.system_prompt().is_some());
         if self.messages.len() <= start + keep + 1 {
             return None;
         }
-        let split = self.messages.len() - keep;
+        let split = split_index(&self.messages, start, keep);
+        if split <= start {
+            return None;
+        }
         Some((self.messages[start..split].to_vec(), split - start))
     }
 
     /// Replace the planned range with a summary message, keeping the system prompt and the
     /// most recent `keep` messages. Returns how many messages were dropped.
     pub fn apply_summary(&mut self, summary: &str, keep: usize) -> usize {
-        let keep = keep.max(2);
         let start = usize::from(self.system_prompt().is_some());
-        let split = self.messages.len().saturating_sub(keep).max(start);
+        let split = split_index(&self.messages, start, keep);
 
         let system_prompt = self.system_prompt().map(str::to_owned);
         let kept: Vec<ChatMessage> = self.messages.split_off(split);
@@ -204,6 +207,54 @@ impl Session {
         self.touch();
         split - start
     }
+
+    /// Remove `tool` messages whose `tool_calls` assistant is not in the history.
+    ///
+    /// The API rejects a `tool` message that does not answer a preceding call, and a
+    /// compaction boundary or a cross-window merge can leave such a result behind. Returns
+    /// how many were dropped.
+    pub fn drop_orphan_tool_results(&mut self) -> usize {
+        let mut call_ids: Vec<String> = Vec::new();
+        let mut kept = Vec::with_capacity(self.messages.len());
+        let mut dropped = 0;
+        for message in self.messages.drain(..) {
+            match message.role {
+                Role::Assistant => {
+                    if let Some(calls) = &message.tool_calls {
+                        call_ids.extend(calls.iter().map(|call| call.id.clone()));
+                    }
+                    kept.push(message);
+                }
+                Role::Tool => {
+                    let answers_a_call = message
+                        .tool_call_id
+                        .as_ref()
+                        .is_some_and(|id| call_ids.iter().any(|known| known == id));
+                    if answers_a_call {
+                        kept.push(message);
+                    } else {
+                        dropped += 1;
+                    }
+                }
+                _ => kept.push(message),
+            }
+        }
+        self.messages = kept;
+        dropped
+    }
+}
+
+/// Where to split a history for compaction.
+///
+/// `keep` is the minimum number of trailing messages to leave verbatim, but the split is
+/// moved earlier when it would land inside a tool exchange: the kept part must not begin with
+/// a `tool` result whose `tool_calls` assistant was summarised away, which the API rejects.
+fn split_index(messages: &[ChatMessage], start: usize, keep: usize) -> usize {
+    let mut split = messages.len().saturating_sub(keep.max(2)).max(start);
+    while split > start && split < messages.len() && messages[split].role == Role::Tool {
+        split -= 1;
+    }
+    split
 }
 
 /// A cheap description of a session, used by listings and pickers.
@@ -764,6 +815,66 @@ mod tests {
         assert_eq!(session.messages[1].role, Role::System);
         assert!(session.messages[1].content.contains("SUM"));
         assert_eq!(&session.messages[2..], tail.as_slice());
+    }
+
+    #[test]
+    fn a_compaction_boundary_never_splits_a_tool_exchange() {
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
+        for i in 0..4 {
+            session.push(ChatMessage::user(format!("q{i}")));
+            session.push(ChatMessage::assistant(format!("a{i}")));
+        }
+        let mut assistant = ChatMessage::assistant("");
+        assistant.tool_calls = Some(vec![tool_call("call_0")]);
+        session.push(assistant); // index 8
+        session.push(ChatMessage::tool("call_0", "result")); // index 9
+        session.push(ChatMessage::user("next")); // index 10
+
+        // `keep = 2` would split at index 9, cutting the result from its call; the plan must
+        // move the boundary back to the assistant that asked for it.
+        let (planned, _removed) = session.compaction_plan(2).unwrap();
+        assert_eq!(
+            planned.len(),
+            8,
+            "the split must move back to the assistant"
+        );
+        let first_kept = session.messages[planned.len()].clone();
+        assert_eq!(first_kept.role, Role::Assistant);
+        assert!(first_kept.tool_calls.is_some());
+
+        // Applying keeps the exchange together and leaves no orphan result.
+        session.apply_summary("SUM", 2);
+        let mut saw_call = false;
+        for message in &session.messages {
+            match message.role {
+                Role::Assistant => saw_call |= message.tool_calls.is_some(),
+                Role::Tool => assert!(saw_call, "a tool result must follow its call"),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn an_orphan_tool_result_is_dropped() {
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
+        session.push(ChatMessage::user("hi"));
+        session.push(ChatMessage::tool("call_ghost", "no call for this"));
+        session.push(ChatMessage::assistant("ok"));
+        assert_eq!(session.drop_orphan_tool_results(), 1);
+        assert!(
+            session
+                .messages
+                .iter()
+                .all(|message| message.role != Role::Tool),
+            "the orphan must be gone"
+        );
+        assert_eq!(session.messages.len(), 2);
+
+        // A result that does answer a call survives.
+        let mut session = session_with_calls(&["call_0"]);
+        session.push(ChatMessage::tool("call_0", "ok"));
+        assert_eq!(session.drop_orphan_tool_results(), 0);
+        assert_eq!(session.messages.len(), 2);
     }
 
     #[test]
