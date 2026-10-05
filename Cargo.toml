@@ -40,6 +40,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 unicode-width = "0.2"
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+ring = "0.17"
 
 [dev-dependencies]
 tokio = { version = "1", features = [

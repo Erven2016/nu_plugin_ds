@@ -19,12 +19,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use nu_plugin_ds::api::ChatMessage;
 use nu_plugin_ds::config::ThinkingEffort;
-use nu_plugin_ds::session::{Session, SessionStore};
+use nu_plugin_ds::session::Session;
 
 use support::{MockResponse, MockServer};
 
 /// The plugin binary being tested.
 const PLUGIN: &str = env!("CARGO_BIN_EXE_nu_plugin_ds");
+
+/// A fixed session key (64 hex characters) so the plugin encrypts deterministically in tests
+/// instead of touching the machine's credential store.
+const TEST_SESSION_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
 /// A directory that is removed when the test finishes.
 struct TempDir(PathBuf);
@@ -96,7 +100,8 @@ impl Harness {
             .arg(script)
             .env("DEEPSEEK_API_KEY", "test-key-123456")
             .env("DEEPSEEK_BASE_URL", self.server.base_url())
-            .env("NU_PLUGIN_DS_CONFIG_DIR", self.home.path());
+            .env("NU_PLUGIN_DS_CONFIG_DIR", self.home.path())
+            .env("NU_PLUGIN_DS_SESSION_KEY", TEST_SESSION_KEY);
         command
     }
 
@@ -432,6 +437,43 @@ fn never_prints_the_api_key() {
     assert!(
         !stdout.contains("test-key-123456"),
         "the key itself must never be printed: {stdout}"
+    );
+}
+
+#[test]
+#[ignore = "needs a `nu` binary on PATH"]
+fn sessions_are_encrypted_at_rest() {
+    let Some(harness) = Harness::new("encrypted", models_and_answer("stored")) else {
+        return;
+    };
+
+    // A single-turn chat writes the conversation to disk.
+    harness.ok("chat --prompt 'remember the secret word pineapple'");
+
+    let sessions = harness.home.path().join("sessions");
+    let file = std::fs::read_dir(&sessions)
+        .expect("the sessions directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .expect("a session file");
+    let bytes = std::fs::read(&file).expect("the session file");
+
+    assert!(
+        bytes.starts_with(b"nupds-enc-v1\n"),
+        "the session should be encrypted on disk"
+    );
+    assert!(
+        !String::from_utf8_lossy(&bytes).contains("pineapple"),
+        "the message text must not be readable in the file"
+    );
+
+    // The plugin can still read it back.
+    let listed = harness.ok("ds sessions | length");
+    assert_eq!(
+        listed.trim(),
+        "1",
+        "the session should still be listed: {listed}"
     );
 }
 
@@ -858,16 +900,21 @@ fn compacts_and_retries_when_the_model_rejects_the_history() {
         return;
     };
 
-    // A long history, written with the library's own types so the plugin reads it back.
-    let store = SessionStore::new(harness.home.path().join("sessions"))
-        .expect("could not open the session store");
+    // A long history, written as plaintext JSON so the plugin reads it back without needing
+    // the test key (its own later writes will be encrypted).
     let mut session = Session::new("long", "deepseek-flash", ThinkingEffort::Off, None);
     for i in 0..6 {
         session.push(ChatMessage::user(format!("question {i}")));
         session.push(ChatMessage::assistant(format!("answer {i}")));
     }
     assert_eq!(session.messages.len(), 12);
-    store.save(&session).expect("could not write the session");
+    let sessions_dir = harness.home.path().join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("could not create the sessions directory");
+    std::fs::write(
+        sessions_dir.join(format!("{}.json", session.id)),
+        serde_json::to_string(&session).expect("could not serialize the session"),
+    )
+    .expect("could not write the session");
 
     let output = harness.nu(&format!(
         "chat --session {} --prompt 'carry on'",

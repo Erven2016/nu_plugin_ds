@@ -2149,6 +2149,7 @@ dependencies = [
  "nu-protocol",
  "ratatui",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "tokio",

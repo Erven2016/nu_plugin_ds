@@ -349,6 +349,11 @@ is **never written to `settings.json`** or any other plaintext file. `ds config`
 where it came from (`api_key_source`) and which store holds it (`api_key_store`), but only
 ever prints a masked version of the key itself.
 
+The same store holds a second entry — the **session encryption key** — created on first use
+and cached for the life of the process, so `chat` does not touch the credential store on
+every save. If no key can be found or created, sessions fall back to plaintext rather than
+failing.
+
 ```nu
 > ds change-api-key                          # ask for the key and store it
 Paste your DeepSeek API key:
@@ -447,8 +452,12 @@ Environment variables: `DEEPSEEK_API_KEY` (optional if a key is stored),
 * **The API key is read from `--api-key`, then `$env.DEEPSEEK_API_KEY`, then the OS
   credential store.** It is never written to disk in plaintext, and `ds config` only ever
   prints a masked version. Use `ds change-api-key` to store or remove it.
-* Conversations are plain JSON files under `<config>/sessions/`; they are written through a
-  temporary file and renamed, so an interrupted write cannot lose one.
+* Conversations live under `<config>/sessions/`, written through a temporary file and
+  renamed so an interrupted write cannot lose one. Each file is **encrypted at rest** with
+  ChaCha20-Poly1305 under a 256-bit key kept in the OS credential store (see
+  [Where the API key lives](#where-the-api-key-lives)); a file written before encryption
+  existed is still read as plaintext. Set `$env.NU_PLUGIN_DS_SESSION_KEY` to 64 hex
+  characters to pin the key yourself (mainly for scripts and tests).
 
 ## Disclaimer
 

@@ -15,6 +15,7 @@ pub mod chat;
 pub mod commands;
 pub mod config;
 pub mod credential;
+pub mod crypto;
 pub mod error;
 pub mod session;
 pub mod token;

@@ -221,14 +221,27 @@ pub struct SessionSummary {
 #[derive(Clone, Debug)]
 pub struct SessionStore {
     dir: PathBuf,
+    /// The key sessions are encrypted with, or `None` to store them as plaintext.
+    key: Option<crate::crypto::Key>,
 }
 
 impl SessionStore {
     pub fn new(dir: impl Into<PathBuf>) -> Result<Self> {
+        Self::open(dir, crate::crypto::load_key())
+    }
+
+    /// A store with an explicit key, so tests can exercise encryption without touching the
+    /// machine's credential store.
+    #[cfg(test)]
+    pub fn with_key(dir: impl Into<PathBuf>, key: crate::crypto::Key) -> Result<Self> {
+        Self::open(dir, Some(key))
+    }
+
+    fn open(dir: impl Into<PathBuf>, key: Option<crate::crypto::Key>) -> Result<Self> {
         let dir = dir.into();
         fs::create_dir_all(&dir)
             .with_context(|| format!("could not create the session directory {}", dir.display()))?;
-        Ok(SessionStore { dir })
+        Ok(SessionStore { dir, key })
     }
 
     pub fn dir(&self) -> &Path {
@@ -270,7 +283,7 @@ impl SessionStore {
                 continue;
             }
 
-            match read_head(&path) {
+            match self.read_head(&path) {
                 Ok(head) => {
                     let turns = head
                         .messages
@@ -300,17 +313,21 @@ impl SessionStore {
         if !path.exists() {
             bail!("there is no session with id `{id}`");
         }
-        read_session(&path)
+        self.read_session(&path)
     }
 
     pub fn save(&self, session: &Session) -> Result<()> {
         let path = self.path_for(&session.id)?;
         // Compact, not pretty: a session is rewritten on every message, and this is both
-        // faster and smaller to write. It is still ordinary JSON.
-        let raw = serde_json::to_string(session)?;
+        // faster and smaller to write.
+        let json = serde_json::to_vec(session)?;
+        let bytes = match &self.key {
+            Some(key) => crate::crypto::encrypt(key, &json)?,
+            None => json,
+        };
         // Write to a sibling file first so an interrupted write cannot lose the session.
         let temporary = path.with_extension("json.tmp");
-        fs::write(&temporary, raw)
+        fs::write(&temporary, bytes)
             .with_context(|| format!("could not write {}", temporary.display()))?;
         fs::rename(&temporary, &path)
             .with_context(|| format!("could not replace {}", path.display()))?;
@@ -363,13 +380,39 @@ impl SessionStore {
             }
         }
     }
-}
 
-fn read_session(path: &Path) -> Result<Session> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("could not read the session {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("{} is not a valid session file", path.display()))
+    /// Read a session file, decrypting it first when it is encrypted.
+    fn read_session(&self, path: &Path) -> Result<Session> {
+        let bytes = self.read_bytes(path)?;
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("{} is not a valid session file", path.display()))
+    }
+
+    /// Read enough of a session file to build a [`SessionSummary`].
+    fn read_head(&self, path: &Path) -> Result<SessionHead> {
+        let bytes = self.read_bytes(path)?;
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("{} is not a valid session file", path.display()))
+    }
+
+    /// The raw session bytes, decrypted when the file is one of ours.
+    fn read_bytes(&self, path: &Path) -> Result<Vec<u8>> {
+        let blob = fs::read(path)
+            .with_context(|| format!("could not read the session {}", path.display()))?;
+        if !crate::crypto::is_encrypted(&blob) {
+            return Ok(blob);
+        }
+        let key = self.key.as_ref().ok_or_else(|| {
+            anyhow!(
+                "{} is encrypted but no session key is available; set ${} or restore the \
+                 stored key",
+                path.display(),
+                crate::crypto::ENV_KEY
+            )
+        })?;
+        crate::crypto::decrypt(key, &blob)
+            .with_context(|| format!("could not decrypt {}", path.display()))
+    }
 }
 
 /// The head of a session file, enough to build a [`SessionSummary`].
@@ -407,13 +450,6 @@ impl SessionHead {
             .filter(|title| !title.is_empty())
             .unwrap_or_else(|| "(empty session)".to_owned())
     }
-}
-
-fn read_head(path: &Path) -> Result<SessionHead> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("could not read the session {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("{} is not a valid session file", path.display()))
 }
 
 /// Generate a session id that is unique enough without pulling in a uuid crate.
@@ -549,6 +585,38 @@ mod tests {
         assert_eq!(loaded.user_turns(), 1);
         assert_eq!(loaded.title(), "demo");
         assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn encrypted_sessions_round_trip_and_plaintext_still_loads() {
+        let dir = tempdir::TempDir::new();
+        let store = SessionStore::with_key(dir.path(), [42u8; 32]).unwrap();
+        let mut session = Session::new("secret", "deepseek-flash", ThinkingEffort::Off, None);
+        session.push(ChatMessage::user("a private question"));
+        store.save(&session).unwrap();
+
+        // On disk it is encrypted: not JSON, and the text does not leak.
+        let raw = std::fs::read(dir.path().join(format!("{}.json", session.id))).unwrap();
+        assert!(crate::crypto::is_encrypted(&raw));
+        assert!(!String::from_utf8_lossy(&raw).contains("private question"));
+
+        // It loads back with the key, for both reading and listing.
+        let loaded = store.load(&session.id).unwrap();
+        assert_eq!(loaded.messages[0].content, "a private question");
+        assert_eq!(store.list().unwrap().len(), 1);
+
+        // A store with no key cannot read it.
+        let keyless = SessionStore::new(dir.path()).unwrap();
+        assert!(keyless.load(&session.id).is_err());
+
+        // A plaintext file still loads, for sessions written before encryption existed.
+        let plain = Session::new("plain", "deepseek-flash", ThinkingEffort::Off, None);
+        std::fs::write(
+            dir.path().join(format!("{}.json", plain.id)),
+            serde_json::to_string(&plain).unwrap(),
+        )
+        .unwrap();
+        assert!(keyless.load(&plain.id).is_ok());
     }
 
     #[test]
