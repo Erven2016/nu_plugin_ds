@@ -9,12 +9,12 @@ use crate::api::ChatMessage;
 /// Approximate tokens in a single message, including the chat template overhead.
 pub const MESSAGE_OVERHEAD: usize = 4;
 
-/// Estimate the number of tokens in `text`.
+/// The fractional token cost of `text`, before rounding.
 ///
-/// Latin text is assumed to average four characters per token, CJK and other
-/// wide characters closer to one token per character. This tracks DeepSeek's published
-/// guidance closely enough for budgeting purposes.
-pub fn estimate_tokens(text: &str) -> usize {
+/// Streamed deltas accumulate with this rather than [`estimate_tokens`], so the rounding
+/// happens once over the whole answer instead of once per fragment (which would wildly
+/// over-count a token-at-a-time stream).
+pub fn token_cost(text: &str) -> f32 {
     let mut tokens = 0.0f32;
     for ch in text.chars() {
         if ch.is_ascii_whitespace() || ch.is_ascii_punctuation() {
@@ -27,7 +27,16 @@ pub fn estimate_tokens(text: &str) -> usize {
             tokens += 0.6;
         }
     }
-    tokens.ceil() as usize
+    tokens
+}
+
+/// Estimate the number of tokens in `text`.
+///
+/// Latin text is assumed to average four characters per token, CJK and other
+/// wide characters closer to one token per character. This tracks DeepSeek's published
+/// guidance closely enough for budgeting purposes.
+pub fn estimate_tokens(text: &str) -> usize {
+    token_cost(text).ceil() as usize
 }
 
 /// Estimate the tokens required to send a whole conversation.
@@ -95,5 +104,17 @@ mod tests {
     fn message_overhead_is_counted() {
         let message = ChatMessage::user("hi");
         assert_eq!(estimate_messages(&[message]), MESSAGE_OVERHEAD + 1);
+    }
+
+    #[test]
+    fn accumulating_cost_rounds_once() {
+        // Rounding each streamed fragment up would over-count badly; the fractional cost
+        // lets a token-at-a-time stream be counted like the whole string at the end.
+        let text = "hello world, this is a streamed answer";
+        let mut cost = 0.0;
+        for ch in text.chars() {
+            cost += token_cost(&ch.to_string());
+        }
+        assert_eq!(cost.ceil() as usize, estimate_tokens(text));
     }
 }

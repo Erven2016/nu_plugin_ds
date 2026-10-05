@@ -29,6 +29,10 @@ enum DecodedEvent {
 #[derive(Default)]
 struct SseDecoder {
     buffer: Vec<u8>,
+    /// How much of `buffer` has already been turned into events. Consuming from a cursor
+    /// rather than draining the front keeps this linear: `Vec::drain(..n)` would move the
+    /// rest of the buffer on every event.
+    start: usize,
     eof: bool,
 }
 
@@ -44,16 +48,28 @@ impl SseDecoder {
 
     /// Pull the next complete event out of the buffer.
     fn next_event(&mut self) -> Option<DecodedEvent> {
-        if let Some(end) = find_event_boundary(&self.buffer) {
-            let event: Vec<u8> = self.buffer.drain(..end).collect();
-            self.buffer.drain(..2);
-            return Some(parse_event(&event));
+        if let Some(end) = find_event_boundary(&self.buffer[self.start..]) {
+            let event = parse_event(&self.buffer[self.start..self.start + end]);
+            self.start += end + 2;
+            self.compact();
+            return Some(event);
         }
-        if self.eof && !self.buffer.is_empty() {
-            let event = std::mem::take(&mut self.buffer);
-            return Some(parse_event(&event));
+        if self.eof && self.start < self.buffer.len() {
+            let event = parse_event(&self.buffer[self.start..]);
+            self.start = self.buffer.len();
+            self.compact();
+            return Some(event);
         }
         None
+    }
+
+    /// Drop the consumed prefix once enough of it has piled up, so the buffer cannot grow
+    /// without bound during a long stream.
+    fn compact(&mut self) {
+        if self.start > 0 && (self.start == self.buffer.len() || self.start >= 4096) {
+            self.buffer.drain(..self.start);
+            self.start = 0;
+        }
     }
 }
 

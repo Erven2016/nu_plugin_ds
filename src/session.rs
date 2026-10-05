@@ -247,6 +247,10 @@ impl SessionStore {
     }
 
     /// All known sessions, most recently used first.
+    ///
+    /// Only the head of each file is deserialized (see [`SessionHead`]): the reasoning and
+    /// tool-call payloads of every message are skipped rather than allocated, so listing
+    /// many large conversations stays cheap.
     pub fn list(&self) -> Result<Vec<SessionSummary>> {
         let mut summaries = Vec::new();
 
@@ -259,15 +263,22 @@ impl SessionStore {
                 continue;
             }
 
-            match read_session(&path) {
-                Ok(session) => summaries.push(SessionSummary {
-                    id: session.id.clone(),
-                    title: session.title(),
-                    model: session.model.clone(),
-                    updated_at: session.updated_at,
-                    message_count: session.messages.len(),
-                    turns: session.user_turns(),
-                }),
+            match read_head(&path) {
+                Ok(head) => {
+                    let turns = head
+                        .messages
+                        .iter()
+                        .filter(|message| message.role == Role::User)
+                        .count();
+                    summaries.push(SessionSummary {
+                        title: head.title(),
+                        id: head.id,
+                        model: head.model,
+                        updated_at: head.updated_at,
+                        message_count: head.messages.len(),
+                        turns,
+                    });
+                }
                 // A single unreadable session should not hide the rest.
                 Err(err) => eprintln!("nu_plugin_ds: skipping {path:?}: {err:#}"),
             }
@@ -287,7 +298,9 @@ impl SessionStore {
 
     pub fn save(&self, session: &Session) -> Result<()> {
         let path = self.path_for(&session.id)?;
-        let raw = serde_json::to_string_pretty(session)?;
+        // Compact, not pretty: a session is rewritten on every message, and this is both
+        // faster and smaller to write. It is still ordinary JSON.
+        let raw = serde_json::to_string(session)?;
         // Write to a sibling file first so an interrupted write cannot lose the session.
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, raw)
@@ -346,6 +359,50 @@ impl SessionStore {
 }
 
 fn read_session(path: &Path) -> Result<Session> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("could not read the session {}", path.display()))?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("{} is not a valid session file", path.display()))
+}
+
+/// The head of a session file, enough to build a [`SessionSummary`].
+///
+/// Serde ignores the fields this struct does not name, so the reasoning text and tool-call
+/// payloads of every message are skipped instead of being allocated.
+#[derive(Deserialize)]
+struct SessionHead {
+    id: String,
+    #[serde(default)]
+    name: String,
+    model: String,
+    updated_at: DateTime<Local>,
+    #[serde(default)]
+    messages: Vec<MessageHead>,
+}
+
+#[derive(Deserialize)]
+struct MessageHead {
+    role: Role,
+    #[serde(default)]
+    content: String,
+}
+
+impl SessionHead {
+    /// The title exactly as [`Session::title`] would compute it.
+    fn title(&self) -> String {
+        if !self.name.trim().is_empty() {
+            return self.name.clone();
+        }
+        self.messages
+            .iter()
+            .find(|message| message.role == Role::User)
+            .map(|message| ChatMessage::user(message.content.as_str()).preview(48))
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "(empty session)".to_owned())
+    }
+}
+
+fn read_head(path: &Path) -> Result<SessionHead> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("could not read the session {}", path.display()))?;
     serde_json::from_str(&raw)
@@ -485,6 +542,32 @@ mod tests {
         assert_eq!(loaded.user_turns(), 1);
         assert_eq!(loaded.title(), "demo");
         assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn listing_reads_only_the_head_but_matches_the_session() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("", "deepseek-flash", ThinkingEffort::Off, None);
+        session.push(ChatMessage::user("列出当前目录所有文件"));
+        // Reasoning and tool payloads are the fields the head reader must skip, so a
+        // summary built from it still has to agree with the full session.
+        session.push(
+            ChatMessage::assistant("done")
+                .with_reasoning("a long private chain of thought listings must not allocate"),
+        );
+        session.push(ChatMessage::tool("call_1", "file listing output"));
+        store.save(&session).unwrap();
+
+        let summaries = store.list().unwrap();
+        let summary = summaries
+            .iter()
+            .find(|summary| summary.id == session.id)
+            .expect("the saved session is listed");
+        assert_eq!(summary.title, session.title());
+        assert_eq!(summary.message_count, session.messages.len());
+        assert_eq!(summary.turns, session.user_turns());
+        assert_eq!(summary.model, session.model);
+        assert_eq!(summary.updated_at, session.updated_at);
     }
 
     #[test]

@@ -19,7 +19,7 @@ use crate::api::{
 };
 use crate::config::{Settings, ThinkingEffort};
 use crate::session::{Session, SessionStore, SessionSummary};
-use crate::token::{estimate_messages, estimate_tokens};
+use crate::token::{estimate_messages, token_cost};
 
 use super::input::InputBuffer;
 use super::tools;
@@ -27,6 +27,10 @@ use super::ui;
 
 /// How long the event loop waits before redrawing when nothing happens.
 const TICK: Duration = Duration::from_millis(60);
+
+/// The shortest gap between two frames while a turn is running: a fast token stream is
+/// coalesced into ~30 frames per second instead of one frame per token.
+const FRAME: Duration = Duration::from_millis(33);
 
 /// How many times a rejected-too-long request is retried after compacting.
 pub const CONTEXT_RETRIES: usize = 2;
@@ -187,6 +191,11 @@ pub struct StreamState {
     pub usage: Option<Usage>,
     /// Tool calls the model asked for, assembled from streamed fragments.
     pub tool_calls: crate::api::ToolCallAccumulator,
+    /// The running (fractional) token cost of `reasoning` + `content`, accumulated as the
+    /// deltas arrive so the status bar never has to re-walk the whole answer each frame.
+    cost: f32,
+    /// The same, for `content` alone, so the streaming label can show the answer's size.
+    content_cost: f32,
     /// Set when the user cancelled the turn, so it does not carry on into a tool round.
     cancelled: bool,
     started: Instant,
@@ -201,6 +210,8 @@ impl StreamState {
             content: String::new(),
             usage: None,
             tool_calls: crate::api::ToolCallAccumulator::default(),
+            cost: 0.0,
+            content_cost: 0.0,
             cancelled: false,
             started: Instant::now(),
         }
@@ -208,6 +219,11 @@ impl StreamState {
 
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
+    }
+
+    /// The estimated tokens generated for the answer text so far.
+    pub(super) fn content_tokens(&self) -> usize {
+        self.content_cost.ceil() as usize
     }
 }
 
@@ -363,16 +379,32 @@ impl ChatApp {
         }
 
         // Draw when something changed, or while a spinner is animating, so an idle window
-        // costs nothing even with a very long history.
+        // costs nothing even with a very long history. While busy the frame rate is capped,
+        // and every event already queued is handled before the next draw, so a fast token
+        // stream is coalesced into one frame instead of one frame per token.
         let mut redraw = true;
+        let mut last_draw: Option<Instant> = None;
         while !self.should_quit {
             if redraw {
-                terminal.draw(|frame| ui::draw(frame, &mut self))?;
+                let now = Instant::now();
+                let due = last_draw.is_none_or(|last| now.duration_since(last) >= FRAME);
+                // An idle window redraws on any change immediately; a busy one redraws at
+                // most once per FRAME, which is what keeps a long answer off the CPU.
+                if due || !self.is_busy() {
+                    terminal.draw(|frame| ui::draw(frame, &mut self))?;
+                    last_draw = Some(now);
+                }
             }
 
-            redraw = match self.rx.recv_timeout(TICK) {
+            let timeout = if self.is_busy() { FRAME } else { TICK };
+            redraw = match self.rx.recv_timeout(timeout) {
                 Ok(event) => {
                     self.handle(event);
+                    // Coalesce everything that arrived while this frame was being drawn, so
+                    // a burst of deltas becomes a single redraw.
+                    while let Ok(more) = self.rx.try_recv() {
+                        self.handle(more);
+                    }
                     true
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => self.is_busy(),
@@ -410,10 +442,13 @@ impl ChatApp {
                 };
                 match event {
                     StreamEvent::Reasoning(text) => {
+                        state.cost += token_cost(&text);
                         state.reasoning.push_str(&text);
                         state.phase = Phase::Streaming;
                     }
                     StreamEvent::Content(text) => {
+                        state.cost += token_cost(&text);
+                        state.content_cost += token_cost(&text);
                         state.content.push_str(&text);
                         state.phase = Phase::Streaming;
                     }
@@ -1280,11 +1315,11 @@ impl ChatApp {
 
     pub(super) fn context_usage(&self) -> (usize, usize) {
         // The committed history is estimated once per change (the transcript cache keeps
-        // it), not once per frame, so a long conversation does not cost anything here.
+        // it), not once per frame. The in-flight answer's cost is accumulated as its
+        // deltas arrive, so a long stream does not cost anything here either.
         let mut used = self.transcript.tokens();
         if let Some(state) = &self.stream {
-            used += estimate_tokens(&state.reasoning);
-            used += estimate_tokens(&state.content);
+            used += state.cost.ceil() as usize;
         }
         (
             used,
@@ -1313,7 +1348,7 @@ impl ChatApp {
     }
 
     fn plan_keeping(&self, keep: usize) -> Option<(Vec<ChatMessage>, usize)> {
-        if estimate_messages(&self.session.messages) < self.compact_at() {
+        if self.transcript.estimate(&self.session) < self.compact_at() {
             return None;
         }
         self.session.compaction_plan(keep)

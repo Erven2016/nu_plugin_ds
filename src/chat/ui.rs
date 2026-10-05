@@ -10,7 +10,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::api::{ChatMessage, Role, ToolCall, Usage};
-use crate::token::{estimate_messages, estimate_tokens, format_tokens};
+use crate::session::Session;
+use crate::token::{estimate_messages, format_tokens};
 
 use super::app::{Balance, ChatApp, Overlay, Phase, StatusKind};
 use super::markdown;
@@ -74,6 +75,9 @@ pub(super) struct TranscriptCache {
     /// The lower-cased plain text of each line, for fast search matching.
     texts: Vec<String>,
     tokens: usize,
+    /// How many session messages the cached lines cover, so an append can render only the
+    /// new suffix instead of the whole history.
+    rendered: usize,
     /// Bumped on every rebuild, so the search can tell when its line numbers went stale.
     version: u64,
 }
@@ -97,6 +101,7 @@ impl TranscriptCache {
             lines: Vec::new(),
             texts: Vec::new(),
             tokens: 0,
+            rendered: 0,
             version: 0,
         }
     }
@@ -104,6 +109,50 @@ impl TranscriptCache {
     /// The estimated tokens in the committed history, kept in step with the lines.
     pub(super) fn tokens(&self) -> usize {
         self.tokens
+    }
+
+    /// The estimated tokens of the *whole* history, reusing the cached prefix when it still
+    /// matches so a turn does not walk every message just to decide whether to compact.
+    pub(super) fn estimate(&self, session: &Session) -> usize {
+        let usable = self.key.as_ref().is_some_and(|key| {
+            key.session == session.id
+                && key.compactions == session.compactions
+                && key.first_message == first_message_hash(session)
+                && key.messages == self.rendered
+                && self.rendered <= session.messages.len()
+        });
+        if usable {
+            self.tokens + estimate_messages(&session.messages[self.rendered..])
+        } else {
+            estimate_messages(&session.messages)
+        }
+    }
+
+    /// Whether the cached lines can be extended with the messages `next` adds, returning how
+    /// many are already rendered. The cached prefix is reusable only when everything besides
+    /// the message count is unchanged (the same session, no compaction, an untouched first
+    /// message, the same width and markdown setting).
+    fn appendable(&self, next: &TranscriptKey) -> Option<usize> {
+        let key = self.key.as_ref()?;
+        let same = key.session == next.session
+            && key.compactions == next.compactions
+            && key.first_message == next.first_message
+            && key.width == next.width
+            && key.markdown == next.markdown;
+        (same && key.messages == self.rendered && next.messages > key.messages)
+            .then_some(self.rendered)
+    }
+
+    fn push_blank(&mut self) {
+        self.lines.push(Line::default());
+        self.texts.push(String::new());
+    }
+
+    fn push_lines(&mut self, lines: Vec<Line<'static>>) {
+        for line in &lines {
+            self.texts.push(line_text(line).to_lowercase());
+        }
+        self.lines.extend(lines);
     }
 
     /// The lower-cased plain text of each line, used to find search matches.
@@ -119,43 +168,71 @@ impl TranscriptCache {
 
 impl TranscriptKey {
     fn of(app: &ChatApp, width: usize) -> Self {
-        let first_message = app.session.messages.first().map_or(0, |message| {
-            let mut hasher = DefaultHasher::new();
-            message.content.hash(&mut hasher);
-            hasher.finish()
-        });
         TranscriptKey {
             session: app.session.id.clone(),
             messages: app.session.messages.len(),
             compactions: app.session.compactions,
-            first_message,
+            first_message: first_message_hash(&app.session),
             width,
             markdown: app.settings.markdown,
         }
     }
 }
 
+/// A cheap fingerprint of the only message that can be edited in place, via `/system`.
+fn first_message_hash(session: &Session) -> u64 {
+    session.messages.first().map_or(0, |message| {
+        let mut hasher = DefaultHasher::new();
+        message.content.hash(&mut hasher);
+        hasher.finish()
+    })
+}
+
 fn draw_transcript(frame: &mut Frame, app: &mut ChatApp, area: Rect) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let inner_height = area.height.saturating_sub(2) as usize;
 
-    // Re-render the committed history only when something it depends on has changed.
+    // Re-render the committed history only when something it depends on has changed, and
+    // when it merely grew, only render the messages that were appended.
     let key = TranscriptKey::of(app, inner_width);
     if app.transcript.key.as_ref() != Some(&key) {
-        let mut lines = Vec::new();
-        for (index, message) in app.session.messages.iter().enumerate() {
-            if index > 0 {
-                lines.push(Line::default());
+        match app.transcript.appendable(&key) {
+            Some(start) => {
+                for index in start..app.session.messages.len() {
+                    if index > 0 {
+                        app.transcript.push_blank();
+                    }
+                    let mut lines = Vec::new();
+                    push_message(
+                        &mut lines,
+                        &app.session.messages[index],
+                        inner_width,
+                        app.settings.markdown,
+                    );
+                    app.transcript.push_lines(lines);
+                }
+                app.transcript.tokens +=
+                    estimate_messages(&app.session.messages[start..app.session.messages.len()]);
+                app.transcript.rendered = app.session.messages.len();
             }
-            push_message(&mut lines, message, inner_width, app.settings.markdown);
+            None => {
+                let mut lines = Vec::new();
+                for (index, message) in app.session.messages.iter().enumerate() {
+                    if index > 0 {
+                        lines.push(Line::default());
+                    }
+                    push_message(&mut lines, message, inner_width, app.settings.markdown);
+                }
+                let texts: Vec<String> = lines
+                    .iter()
+                    .map(|line| line_text(line).to_lowercase())
+                    .collect();
+                app.transcript.lines = lines;
+                app.transcript.texts = texts;
+                app.transcript.tokens = estimate_messages(&app.session.messages);
+                app.transcript.rendered = app.session.messages.len();
+            }
         }
-        let texts: Vec<String> = lines
-            .iter()
-            .map(|line| line_text(line).to_lowercase())
-            .collect();
-        app.transcript.lines = lines;
-        app.transcript.texts = texts;
-        app.transcript.tokens = estimate_messages(&app.session.messages);
         app.transcript.version += 1;
         app.transcript.key = Some(key);
     }
@@ -173,9 +250,9 @@ fn draw_transcript(frame: &mut Frame, app: &mut ChatApp, area: Rect) {
             if app.transcript.lines.len() + tail.len() > 0 {
                 tail.push(Line::default());
             }
-            push_message(
+            push_streaming(
                 &mut tail,
-                &ChatMessage::assistant(state.content.clone()),
+                &state.content,
                 inner_width,
                 app.settings.markdown,
             );
@@ -462,6 +539,34 @@ fn push_tool_calls(lines: &mut Vec<Line<'static>>, calls: &[ToolCall], width: us
     }
 }
 
+/// The tail while an assistant answer is still streaming in.
+///
+/// Built from the content directly rather than through a throwaway `ChatMessage`, so a
+/// frame does not clone the whole answer just to render it.
+fn push_streaming(
+    lines: &mut Vec<Line<'static>>,
+    content: &str,
+    width: usize,
+    markdown_enabled: bool,
+) {
+    lines.push(Line::from(Span::styled(
+        "deepseek".to_owned(),
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    )));
+    if markdown_enabled {
+        lines.extend(markdown::lines(content, width, INDENT));
+    } else {
+        lines.extend(markdown::plain_lines(
+            content,
+            width,
+            INDENT,
+            Style::default(),
+        ));
+    }
+}
+
 fn push_reasoning(lines: &mut Vec<Line<'static>>, reasoning: &str, width: usize) {
     let dim = Style::default()
         .fg(Color::DarkGray)
@@ -474,11 +579,11 @@ fn push_reasoning(lines: &mut Vec<Line<'static>>, reasoning: &str, width: usize)
             .add_modifier(Modifier::BOLD),
     )));
 
-    // Only the tail is interesting; the whole trace can be enormous.
-    let tail = tail_lines(reasoning, 6);
-    let was_truncated = tail.len() < reasoning.lines().count();
+    // Only the tail is interesting; the whole trace can be enormous, so take it without
+    // scanning the whole string (which would make every frame cost O(reasoning)).
+    let (tail, truncated) = tail_lines(reasoning, 6);
 
-    if was_truncated {
+    if truncated {
         lines.push(Line::from(Span::styled(
             format!("{}… (earlier reasoning hidden)", " ".repeat(INDENT)),
             dim,
@@ -487,13 +592,19 @@ fn push_reasoning(lines: &mut Vec<Line<'static>>, reasoning: &str, width: usize)
     lines.extend(markdown::plain_lines(&tail, width, INDENT, dim));
 }
 
-/// The last `count` lines of `text`, joined back together.
-fn tail_lines(text: &str, count: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.len() <= count {
-        return text.to_owned();
+/// The last `count` lines of `text`, and whether anything was dropped. Only the tail is
+/// scanned, so this is O(tail), not O(text).
+fn tail_lines(text: &str, count: usize) -> (String, bool) {
+    let mut seen = 0;
+    for (index, ch) in text.char_indices().rev() {
+        if ch == '\n' {
+            seen += 1;
+            if seen == count {
+                return (text[index + 1..].to_owned(), true);
+            }
+        }
     }
-    lines[lines.len() - count..].join("\n")
+    (text.to_owned(), false)
 }
 
 // -------------------------------------------------------------------- input
@@ -579,7 +690,7 @@ fn draw_status(frame: &mut Frame, app: &ChatApp, area: Rect) {
                 Phase::Streaming => format!(
                     "streaming ({:.1}s, ~{} tokens)",
                     state.elapsed().as_secs_f32(),
-                    estimate_tokens(&state.content)
+                    state.content_tokens()
                 ),
                 Phase::Finishing => "finishing…".to_owned(),
             },
@@ -1395,6 +1506,61 @@ mod tests {
         assert!(
             !screen.contains("question 0"),
             "the oldest turn should have scrolled away:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn appending_a_message_matches_a_full_rebuild() {
+        let mut session = Session::new("demo", "deepseek-flash", Default::default(), None);
+        session.push(ChatMessage::user("first question"));
+        session.push(ChatMessage::assistant("first **answer**"));
+        let (_dir, mut app) = app(session);
+
+        // Warm the cache, then append: the second draw takes the incremental path.
+        let _ = snapshot(&mut app, 60, 20);
+        let rendered = app.transcript.lines.len();
+        app.session.push(ChatMessage::user("a second question"));
+        let incremental = text(&snapshot(&mut app, 60, 20));
+        assert!(
+            app.transcript.lines.len() > rendered,
+            "the new message must have been appended"
+        );
+
+        // Forcing a full rebuild of the same history must produce the same screen.
+        app.transcript = TranscriptCache::new();
+        let rebuilt = text(&snapshot(&mut app, 60, 20));
+        assert_eq!(incremental, rebuilt);
+    }
+
+    #[test]
+    fn the_token_estimate_matches_the_full_walk_after_an_append() {
+        let mut session = Session::new("demo", "deepseek-flash", Default::default(), None);
+        session.push(ChatMessage::user("hello"));
+        session.push(ChatMessage::assistant("hi there"));
+        let (_dir, mut app) = app(session);
+        let _ = snapshot(&mut app, 60, 20);
+
+        app.session.push(ChatMessage::user("another turn"));
+        assert_eq!(
+            app.transcript.estimate(&app.session),
+            estimate_messages(&app.session.messages)
+        );
+
+        // An in-place edit invalidates the cached prefix, so the estimate falls back rather
+        // than reporting a stale number.
+        app.session.messages[0] = ChatMessage::user("edited");
+        assert_eq!(
+            app.transcript.estimate(&app.session),
+            estimate_messages(&app.session.messages)
+        );
+    }
+
+    #[test]
+    fn tail_lines_keeps_the_last_lines() {
+        assert_eq!(tail_lines("a\nb\nc", 6), ("a\nb\nc".to_owned(), false));
+        assert_eq!(
+            tail_lines("a\nb\nc\nd\ne\nf\ng", 6),
+            ("b\nc\nd\ne\nf\ng".to_owned(), true)
         );
     }
 
