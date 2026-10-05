@@ -8,7 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::Notify;
@@ -31,6 +33,9 @@ const TICK: Duration = Duration::from_millis(60);
 /// The shortest gap between two frames while a turn is running: a fast token stream is
 /// coalesced into ~30 frames per second instead of one frame per token.
 const FRAME: Duration = Duration::from_millis(33);
+
+/// How many transcript lines one notch of the mouse wheel scrolls.
+const WHEEL_LINES: isize = 3;
 
 /// How many times a rejected-too-long request is retried after compacting.
 pub const CONTEXT_RETRIES: usize = 2;
@@ -564,10 +569,25 @@ impl ChatApp {
     fn handle_terminal(&mut self, event: Event) {
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key(key),
+            Event::Mouse(mouse) => self.on_mouse(mouse),
             Event::Paste(text) => {
                 self.input.insert_str(&text);
                 self.follow_output();
             }
+            _ => {}
+        }
+    }
+
+    /// The mouse wheel scrolls the transcript a few lines per notch; every other mouse event
+    /// (clicks, drags, movement) is ignored. While an overlay is open the wheel is ignored
+    /// too, since the overlay owns the input.
+    fn on_mouse(&mut self, mouse: MouseEvent) {
+        if self.overlay.is_some() {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll_by(WHEEL_LINES),
+            MouseEventKind::ScrollDown => self.scroll_by(-WHEEL_LINES),
             _ => {}
         }
     }
@@ -2344,6 +2364,47 @@ mod tests {
             app.store.load(&deleted_id).is_err(),
             "a later save brought the deleted session back"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_mouse_wheel_scrolls_the_transcript() {
+        let dir = temp_dir("mouse");
+        let session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
+        let mut app = test_app(&dir, session);
+        // Normally published by the last frame; a draw would set it.
+        app.scroll_max = 100;
+        app.stick_to_bottom = true;
+
+        let wheel = |kind| {
+            AppEvent::Term(Event::Mouse(MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }))
+        };
+
+        app.handle(wheel(MouseEventKind::ScrollUp));
+        assert_eq!(app.scroll, WHEEL_LINES as usize);
+        assert!(!app.stick_to_bottom, "scrolling up leaves the bottom");
+
+        app.handle(wheel(MouseEventKind::ScrollUp));
+        assert_eq!(app.scroll, (WHEEL_LINES * 2) as usize);
+
+        app.handle(wheel(MouseEventKind::ScrollDown));
+        app.handle(wheel(MouseEventKind::ScrollDown));
+        assert_eq!(app.scroll, 0);
+        assert!(
+            app.stick_to_bottom,
+            "back at the bottom, output follows again"
+        );
+
+        // An open overlay owns the input, so the wheel must not scroll behind it.
+        app.overlay = Some(Overlay::Help);
+        app.handle(wheel(MouseEventKind::ScrollUp));
+        assert_eq!(app.scroll, 0, "the wheel must not scroll behind an overlay");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

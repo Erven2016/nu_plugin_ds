@@ -163,6 +163,7 @@ denylist.**
 | `Ctrl+L` | jump to the end of the transcript |
 | `Ctrl+Home` / `Ctrl+End` | jump to the top / bottom of the transcript |
 | `PgUp` / `PgDn`, `Alt+↑` / `Alt+↓` | scroll the transcript |
+| mouse wheel | scroll the transcript a few lines up or down |
 | `Up` / `Down` | move in the prompt; on the first line they browse the input history |
 | `Left` / `Right`, `Home` / `End`, `Delete`, `Backspace` | move in or edit the prompt |
 | `Ctrl+A` / `Ctrl+E` | jump to the start / end of the line |
