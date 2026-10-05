@@ -12,8 +12,9 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use crate::api::{ChatMessage, Role, ToolCall, Usage};
 use crate::session::Session;
 use crate::token::{estimate_messages, format_tokens};
+use unicode_width::UnicodeWidthChar;
 
-use super::app::{Balance, ChatApp, Overlay, Phase, StatusKind};
+use super::app::{Balance, ChatApp, Overlay, Phase, Selection, StatusKind, TranscriptView};
 use super::markdown;
 use super::tools;
 
@@ -160,6 +161,29 @@ impl TranscriptCache {
         &self.texts
     }
 
+    /// The plain text of transcript line `index`, if it exists.
+    pub(super) fn text_of(&self, index: usize) -> Option<String> {
+        self.lines.get(index).map(line_text)
+    }
+
+    /// The char index within transcript line `index` nearest display column `column`.
+    pub(super) fn char_index_at(&self, index: usize, column: u16) -> Option<usize> {
+        let line = self.lines.get(index)?;
+        let mut col = 0u16;
+        let mut chars = 0usize;
+        for span in &line.spans {
+            for ch in span.content.chars() {
+                let width = ch.width().unwrap_or(0) as u16;
+                if col + width > column {
+                    return Some(chars);
+                }
+                col += width;
+                chars += 1;
+            }
+        }
+        Some(chars)
+    }
+
     /// A counter bumped whenever the lines are rebuilt.
     pub(super) fn version(&self) -> u64 {
         self.version
@@ -216,6 +240,9 @@ fn draw_transcript(frame: &mut Frame, app: &mut ChatApp, area: Rect) {
                 app.transcript.rendered = app.session.messages.len();
             }
             None => {
+                // Line indices all shift, so any existing selection would end up on the
+                // wrong text; drop it rather than leave it pointing somewhere odd.
+                app.selection = None;
                 let mut lines = Vec::new();
                 for (index, message) in app.session.messages.iter().enumerate() {
                     if index > 0 {
@@ -293,6 +320,17 @@ fn draw_transcript(frame: &mut Frame, app: &mut ChatApp, area: Rect) {
         max_offset - app.scroll.min(max_offset)
     };
 
+    // Publish the geometry so the mouse handler can map a click back to a transcript line.
+    let view = inner(area);
+    app.transcript_view = TranscriptView {
+        x: view.x,
+        y: view.y,
+        width: view.width,
+        height: view.height,
+        first_line: offset,
+        committed: cached,
+    };
+
     // Collect the visible rows together with their transcript line numbers, so search hits
     // can be highlighted while the streamed tail (which has no line number) is left alone.
     let mut visible: Vec<(Option<usize>, Line<'static>)> = Vec::with_capacity(inner_height);
@@ -322,11 +360,18 @@ fn draw_transcript(frame: &mut Frame, app: &mut ChatApp, area: Rect) {
 
     let window: Vec<Line<'static>> = visible
         .into_iter()
-        .map(|(index, line)| match (&query, index) {
-            (Some(query), Some(index)) if is_matched(app, index) => {
-                highlight_line(line, query, current == Some(index))
+        .map(|(index, line)| {
+            let line = match (&query, index) {
+                (Some(query), Some(index)) if is_matched(app, index) => {
+                    highlight_line(line, query, current == Some(index))
+                }
+                _ => line,
+            };
+            // The selection is drawn last so its background wins over a search highlight.
+            match (app.selection, index) {
+                (Some(selection), Some(index)) => apply_selection(line, &selection, index),
+                _ => line,
             }
-            _ => line,
         })
         .collect();
 
@@ -457,6 +502,64 @@ fn highlight_line(line: Line<'static>, query: &str, current: bool) -> Line<'stat
             }
         }
         offset += chars.len();
+    }
+    Line::from(spans)
+}
+
+/// The style a mouse selection paints over the text.
+const SELECTION_STYLE: Style = Style::new().fg(Color::Black).bg(Color::LightBlue);
+
+/// Paint the part of `line` (transcript line `index`) that the selection covers.
+fn apply_selection(line: Line<'static>, selection: &Selection, index: usize) -> Line<'static> {
+    let (start, end) = selection.normalized();
+    if index < start.0 || index > end.0 {
+        return line;
+    }
+    let total: usize = line
+        .spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum();
+    let from = if index == start.0 {
+        start.1.min(total)
+    } else {
+        0
+    };
+    let to = if index == end.0 {
+        end.1.min(total)
+    } else {
+        total
+    };
+    if from >= to {
+        return line;
+    }
+    style_chars(line, from, to, SELECTION_STYLE)
+}
+
+/// Rebuild `line` with `style` patched onto the chars in `[from, to)`, keeping each span's
+/// own style elsewhere.
+fn style_chars(line: Line<'static>, from: usize, to: usize, style: Style) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut index = 0usize;
+    for span in line.spans {
+        let mut run = String::new();
+        let mut run_style = span.style;
+        for ch in span.content.chars() {
+            let want = if index >= from && index < to {
+                span.style.patch(style)
+            } else {
+                span.style
+            };
+            if want != run_style && !run.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut run), run_style));
+            }
+            run_style = want;
+            run.push(ch);
+            index += 1;
+        }
+        if !run.is_empty() {
+            spans.push(Span::styled(run, run_style));
+        }
     }
     Line::from(spans)
 }

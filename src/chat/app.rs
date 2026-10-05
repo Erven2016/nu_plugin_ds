@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
@@ -174,6 +174,44 @@ pub(super) struct Search {
     pub(super) version: u64,
 }
 
+/// A run of the transcript the user selected with the mouse.
+///
+/// Positions are `(transcript line, char index)`, not screen cells, so a selection stays
+/// valid while the view scrolls and the streamed tail grows underneath it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Selection {
+    pub(super) anchor: (usize, usize),
+    pub(super) cursor: (usize, usize),
+    /// True between the button going down and coming back up, so only a drag extends it.
+    pub(super) dragging: bool,
+}
+
+impl Selection {
+    /// The two ends, in reading order.
+    pub(super) fn normalized(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.cursor {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+}
+
+/// Where the transcript was drawn last frame, so a mouse position can be mapped back to a
+/// line and a column. Published by the renderer, like [`ChatApp::scroll_max`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct TranscriptView {
+    /// The transcript's inner rectangle (inside the border).
+    pub(super) x: u16,
+    pub(super) y: u16,
+    pub(super) width: u16,
+    pub(super) height: u16,
+    /// The transcript line drawn on the first inner row.
+    pub(super) first_line: usize,
+    /// How many committed transcript lines exist; rows past this show the streaming tail.
+    pub(super) committed: usize,
+}
+
 /// The stage the current turn is in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -282,6 +320,10 @@ pub struct ChatApp {
     /// The rendered transcript, kept between frames so a long history is not re-rendered
     /// (and its markdown not re-parsed) on every frame.
     pub(super) transcript: ui::TranscriptCache,
+    /// The mouse selection over the transcript, if any.
+    pub(super) selection: Option<Selection>,
+    /// Where the transcript was drawn last frame, used to map mouse events back to lines.
+    pub(super) transcript_view: TranscriptView,
     /// Lines scrolled up from the bottom of the transcript.
     pub(super) scroll: usize,
     /// The largest useful `scroll`, from the last frame. Paging up at the top must not add
@@ -337,6 +379,8 @@ impl ChatApp {
             search: None,
             search_draft: String::new(),
             transcript: ui::TranscriptCache::new(),
+            selection: None,
+            transcript_view: TranscriptView::default(),
             scroll: 0,
             scroll_max: 0,
             stick_to_bottom: true,
@@ -578,9 +622,10 @@ impl ChatApp {
         }
     }
 
-    /// The mouse wheel scrolls the transcript a few lines per notch; every other mouse event
-    /// (clicks, drags, movement) is ignored. While an overlay is open the wheel is ignored
-    /// too, since the overlay owns the input.
+    /// The mouse drives two things: the wheel scrolls the transcript a few lines per notch,
+    /// and a left-button drag selects a run of text (copied to the clipboard on release).
+    /// Every other mouse event is ignored, and while an overlay is open the mouse is ignored
+    /// entirely, since the overlay owns the input.
     fn on_mouse(&mut self, mouse: MouseEvent) {
         if self.overlay.is_some() {
             return;
@@ -588,8 +633,128 @@ impl ChatApp {
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll_by(WHEEL_LINES),
             MouseEventKind::ScrollDown => self.scroll_by(-WHEEL_LINES),
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.begin_selection(mouse.column, mouse.row)
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.extend_selection(mouse.column, mouse.row)
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.end_selection(),
             _ => {}
         }
+    }
+
+    /// Start a selection where the button went down, or clear any existing one when the
+    /// press did not land on a committed transcript line.
+    fn begin_selection(&mut self, column: u16, row: u16) {
+        self.selection = self
+            .transcript_position(column, row)
+            .map(|position| Selection {
+                anchor: position,
+                cursor: position,
+                dragging: true,
+            });
+    }
+
+    fn extend_selection(&mut self, column: u16, row: u16) {
+        let dragging = self
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.dragging);
+        if !dragging {
+            return;
+        }
+        if let Some(position) = self.clamped_transcript_position(column, row)
+            && let Some(selection) = self.selection.as_mut()
+        {
+            selection.cursor = position;
+        }
+    }
+
+    /// Finish the drag: copy the selected text, or just drop an empty selection.
+    fn end_selection(&mut self) {
+        let Some(selection) = self.selection.as_mut() else {
+            return;
+        };
+        selection.dragging = false;
+        let selection = *selection;
+        if selection.normalized().0 == selection.normalized().1 {
+            self.selection = None;
+            return;
+        }
+        match self
+            .selected_text(&selection)
+            .filter(|text| !text.is_empty())
+        {
+            Some(text) => {
+                let chars = text.chars().count();
+                copy_to_clipboard(&text);
+                self.set_status(
+                    format!("copied {chars} characters to the clipboard"),
+                    StatusKind::Info,
+                );
+            }
+            None => self.selection = None,
+        }
+    }
+
+    /// The transcript position under a screen cell, when it lands on a committed line.
+    fn transcript_position(&self, column: u16, row: u16) -> Option<(usize, usize)> {
+        let view = &self.transcript_view;
+        if column < view.x
+            || column >= view.x + view.width
+            || row < view.y
+            || row >= view.y + view.height
+        {
+            return None;
+        }
+        let line = view.first_line + (row - view.y) as usize;
+        if line >= view.committed {
+            return None;
+        }
+        let ch = self.transcript.char_index_at(line, column - view.x)?;
+        Some((line, ch))
+    }
+
+    /// Like [`Self::transcript_position`], but clamps a drag that ran off the transcript
+    /// back onto the nearest committed cell, so a selection can be dragged past the edges.
+    fn clamped_transcript_position(&self, column: u16, row: u16) -> Option<(usize, usize)> {
+        let view = &self.transcript_view;
+        if view.committed == 0 || view.width == 0 || view.height == 0 {
+            return None;
+        }
+        let col = column.saturating_sub(view.x).min(view.width - 1);
+        let row = row.clamp(view.y, view.y + view.height - 1);
+        let line = (view.first_line + (row - view.y) as usize).min(view.committed - 1);
+        self.transcript
+            .char_index_at(line, col)
+            .map(|ch| (line, ch))
+    }
+
+    /// The plain text the selection covers, joined with newlines between lines.
+    pub(super) fn selected_text(&self, selection: &Selection) -> Option<String> {
+        let (start, end) = selection.normalized();
+        let mut out = String::new();
+        for line in start.0..=end.0 {
+            let chars: Vec<char> = self.transcript.text_of(line)?.chars().collect();
+            let from = if line == start.0 {
+                start.1.min(chars.len())
+            } else {
+                0
+            };
+            let to = if line == end.0 {
+                end.1.min(chars.len())
+            } else {
+                chars.len()
+            };
+            if from < to {
+                out.extend(&chars[from..to]);
+            }
+            if line != end.0 {
+                out.push('\n');
+            }
+        }
+        Some(out)
     }
 
     fn on_key(&mut self, key: KeyEvent) {
@@ -1907,6 +2072,45 @@ fn first_line(text: &str) -> String {
     crate::api::types::truncate(line, 60)
 }
 
+/// Put `text` on the system clipboard using the `OSC 52` escape sequence.
+///
+/// The plugin captures the mouse, so the terminal's own select-and-copy no longer works;
+/// this writes the selection out the way a terminal clipboard integration does, without
+/// pulling in a platform clipboard crate. Terminals that do not implement OSC 52 ignore it.
+fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+
+    let payload = base64(text.as_bytes());
+    let mut stdout = std::io::stdout();
+    let _ = write!(stdout, "\x1b]52;c;{payload}\x07");
+    let _ = stdout.flush();
+}
+
+/// Standard base64, so an arbitrary selection can ride inside the OSC 52 payload.
+fn base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /// Whether a key event is `Ctrl+/`, which opens the help card.
 ///
 /// Terminals disagree about how to spell it and crossterm passes through whatever it
@@ -2405,6 +2609,57 @@ mod tests {
         app.overlay = Some(Overlay::Help);
         app.handle(wheel(MouseEventKind::ScrollUp));
         assert_eq!(app.scroll, 0, "the wheel must not scroll behind an overlay");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dragging_the_mouse_selects_and_copies_transcript_text() {
+        let dir = temp_dir("selection");
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
+        session.push(ChatMessage::user("hello world"));
+        let mut app = test_app(&dir, session);
+
+        // Render a frame so the transcript is built and its geometry published.
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+
+        let view = app.transcript_view;
+        let line = (view.first_line..view.first_line + view.height as usize)
+            .find(|index| {
+                app.transcript
+                    .text_of(*index)
+                    .is_some_and(|text| text.contains("hello world"))
+            })
+            .expect("the user's text should be on screen");
+        let start = app.transcript.text_of(line).unwrap().find("hello").unwrap() as u16;
+        let row = view.y + (line - view.first_line) as u16;
+
+        let event = |kind, column| {
+            AppEvent::Term(Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }))
+        };
+        app.handle(event(
+            MouseEventKind::Down(MouseButton::Left),
+            view.x + start,
+        ));
+        app.handle(event(
+            MouseEventKind::Drag(MouseButton::Left),
+            view.x + start + 5,
+        ));
+        assert!(app.selection.is_some(), "a drag starts a selection");
+
+        app.handle(event(
+            MouseEventKind::Up(MouseButton::Left),
+            view.x + start + 5,
+        ));
+        let selection = app.selection.expect("the selection survives the release");
+        assert_eq!(app.selected_text(&selection).as_deref(), Some("hello"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
