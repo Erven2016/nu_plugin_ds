@@ -25,11 +25,24 @@ API from your shell.
 
 ## Install
 
+Build from source code:
+
 ```nu
 cargo build --release
 plugin add target/release/nu_plugin_ds
 plugin use ds
 ```
+
+Or download the archive for your platform from the
+[releases page](https://github.com/Erven2016/nu_plugin_ds/releases), unpack it, and register
+the binary:
+
+```nu
+plugin add ./nu_plugin_ds
+plugin use ds
+```
+
+
 
 You need an API key. The plugin looks for it in this order and takes the first it
 finds:
