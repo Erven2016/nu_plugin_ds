@@ -235,6 +235,13 @@ impl SessionStore {
         &self.dir
     }
 
+    /// The session file's last modification time, if it exists. Used to notice when another
+    /// `chat` window wrote to the same conversation.
+    pub fn modified(&self, id: &str) -> Option<std::time::SystemTime> {
+        let path = self.path_for(id).ok()?;
+        fs::metadata(&path).ok()?.modified().ok()
+    }
+
     fn path_for(&self, id: &str) -> Result<PathBuf> {
         if id.is_empty()
             || !id

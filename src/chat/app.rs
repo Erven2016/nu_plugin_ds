@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -338,6 +338,9 @@ pub struct ChatApp {
     /// Where the context menu was drawn last frame, as `(x, y, width, height)`, so a click
     /// can be matched to a menu item. `None` when no menu is showing.
     pub(super) menu_area: Option<(u16, u16, u16, u16)>,
+    /// The session file's modification time as we last read or wrote it, so a change made by
+    /// another window can be told apart from our own save.
+    last_modified: Option<SystemTime>,
     /// Lines scrolled up from the bottom of the transcript.
     pub(super) scroll: usize,
     /// The largest useful `scroll`, from the last frame. Paging up at the top must not add
@@ -396,6 +399,7 @@ impl ChatApp {
             selection: None,
             transcript_view: TranscriptView::default(),
             menu_area: None,
+            last_modified: None,
             scroll: 0,
             scroll_max: 0,
             stick_to_bottom: true,
@@ -415,6 +419,9 @@ impl ChatApp {
         {
             app.input.set_text(prompt);
         }
+
+        // Remember the file's mtime so another window's later write is detectable.
+        app.note_modified();
 
         Ok(app)
     }
@@ -449,6 +456,12 @@ impl ChatApp {
         let mut redraw = true;
         let mut last_draw: Option<Instant> = None;
         while !self.should_quit {
+            // Notice a change another window made to the same conversation. Only while idle,
+            // so a turn in flight is never yanked out from under the stream.
+            if !self.is_busy() && self.pull_remote(true) {
+                redraw = true;
+            }
+
             if redraw {
                 let now = Instant::now();
                 let due = last_draw.is_none_or(|last| now.duration_since(last) >= FRAME);
@@ -1095,13 +1108,15 @@ impl ChatApp {
                         return;
                     }
                     KeyCode::Enter => {
-                        if let Some(model) = self.models.get(index) {
-                            self.session.model = model.id.clone();
+                        // Clone the id out first so the borrow of `self.models` ends before
+                        // the mutable `save_session` below.
+                        let id = self.models.get(index).map(|model| model.id.clone());
+                        if let Some(id) = id {
+                            self.session.model = id.clone();
                             self.session.touch();
-                            self.set_status(
-                                format!("model switched to {}", model.id),
-                                StatusKind::Info,
-                            );
+                            // Persist immediately so the other windows follow.
+                            self.save_session();
+                            self.set_status(format!("model switched to {id}"), StatusKind::Info);
                         }
                         self.overlay = None;
                         return;
@@ -1124,6 +1139,8 @@ impl ChatApp {
                         if let Some(effort) = ThinkingEffort::ALL.get(index) {
                             self.session.thinking = *effort;
                             self.session.touch();
+                            // Persist immediately so the other windows follow.
+                            self.save_session();
                             self.set_status(
                                 format!("thinking level set to {}", effort.label()),
                                 StatusKind::Info,
@@ -1311,6 +1328,8 @@ impl ChatApp {
                 } else {
                     self.session.model = argument.to_owned();
                     self.session.touch();
+                    // Persist immediately so the other windows on this conversation follow.
+                    self.save_session();
                     self.set_status(format!("model switched to {argument}"), StatusKind::Info);
                 }
             }
@@ -1324,6 +1343,8 @@ impl ChatApp {
                 } else if let Some(effort) = ThinkingEffort::parse(argument) {
                     self.session.thinking = effort;
                     self.session.touch();
+                    // Persist immediately so the other windows on this conversation follow.
+                    self.save_session();
                     self.set_status(
                         format!("thinking level set to {}", effort.label()),
                         StatusKind::Info,
@@ -1375,6 +1396,8 @@ impl ChatApp {
             self.set_status("system prompt updated", StatusKind::Info);
         }
         self.session.touch();
+        // The prompt is part of the conversation, so persist it for the other windows.
+        self.save_session();
     }
 
     fn toggle_markdown(&mut self) {
@@ -1421,6 +1444,7 @@ impl ChatApp {
             self.settings.system_prompt.as_deref(),
         );
         self.session_closed = false;
+        self.last_modified = None;
         self.refresh_sessions();
         self.scroll = 0;
         self.stick_to_bottom = true;
@@ -1437,6 +1461,8 @@ impl ChatApp {
             Ok(session) => {
                 self.session = session;
                 self.session_closed = false;
+                // Track this file from now on, so a change by another window is noticed.
+                self.note_modified();
                 self.scroll = 0;
                 self.stick_to_bottom = true;
                 self.set_status(
@@ -1487,9 +1513,21 @@ impl ChatApp {
             self.settings.system_prompt.as_deref(),
         );
         self.session_closed = true;
+        self.last_modified = None;
         self.scroll = 0;
         self.stick_to_bottom = true;
         self.input.clear();
+    }
+
+    /// Another window deleted the conversation we have open: close ours too (so nothing
+    /// writes it back) and drop it from the picker's list.
+    fn close_deleted_session(&mut self) {
+        self.close_current_session();
+        self.refresh_sessions();
+        self.set_status(
+            "the open conversation was deleted in another window",
+            StatusKind::Warn,
+        );
     }
 
     fn refresh_sessions(&mut self) {
@@ -1529,12 +1567,94 @@ impl ChatApp {
         if self.session_closed {
             return;
         }
+        // Fold in anything another window wrote while we were not looking, so this save
+        // does not drop their turns — or recreates a session they deleted.
+        self.pull_remote(false);
+        if self.session_closed {
+            return;
+        }
         if let Err(err) = self.store.save(&self.session) {
             self.set_status(
                 format!("could not save the session: {err:#}"),
                 StatusKind::Error,
             );
         }
+        self.note_modified();
+    }
+
+    /// Remember the session file's current mtime as ours, so our own writes are not mistaken
+    /// for another window's.
+    fn note_modified(&mut self) {
+        self.last_modified = self.store.modified(&self.session.id);
+    }
+
+    /// Pull in a change another `chat` window made to the same conversation.
+    ///
+    /// Returns whether the session changed. `allow_structural` controls what happens when the
+    /// other window compacted or cleared the history: a `true` (a quiet poll) lets the file
+    /// win, a `false` (called just before saving) leaves our copy alone so the turn in flight
+    /// is not thrown away.
+    fn pull_remote(&mut self, allow_structural: bool) -> bool {
+        if self.session_closed {
+            return false;
+        }
+        let Some(modified) = self.store.modified(&self.session.id) else {
+            // The file is gone. If we had seen it before, another window deleted the
+            // conversation; close ours too so nothing writes it back.
+            if self.last_modified.is_some() {
+                self.close_deleted_session();
+                return true;
+            }
+            return false;
+        };
+        if Some(modified) == self.last_modified {
+            return false;
+        }
+        let remote = match self.store.load(&self.session.id) {
+            Ok(session) => session,
+            // Unreadable right now (e.g. mid-replace): try again on the next poll.
+            Err(_) => return false,
+        };
+        self.last_modified = Some(modified);
+
+        if remote.compactions != self.session.compactions {
+            if !allow_structural {
+                return false;
+            }
+            self.session = remote;
+            return true;
+        }
+
+        let mut params_changed = false;
+        // The conversation's parameters (model, thinking level, name) changed in the other
+        // window. Only adopted on a quiet poll, so a param this window just changed is not
+        // undone by the save that follows it.
+        if allow_structural {
+            if remote.model != self.session.model {
+                self.session.model = remote.model.clone();
+                params_changed = true;
+            }
+            if remote.thinking != self.session.thinking {
+                self.session.thinking = remote.thinking;
+                params_changed = true;
+            }
+            if remote.name != self.session.name {
+                self.session.name = remote.name.clone();
+                params_changed = true;
+            }
+        }
+
+        let merged = merge_messages(&self.session.messages, &remote.messages);
+        let messages_changed = merged != self.session.messages;
+        if messages_changed {
+            self.session.messages = merged;
+            self.session.updated_at = self.session.updated_at.max(remote.updated_at);
+        }
+        if params_changed {
+            // The picker lists titles/models, so keep it in step.
+            self.refresh_sessions();
+        }
+        params_changed || messages_changed
     }
 
     // -------------------------------------------------------------- pipeline
@@ -2186,6 +2306,29 @@ fn first_line(text: &str) -> String {
     crate::api::types::truncate(line, 60)
 }
 
+/// Merge two views of the same conversation so neither window loses a turn.
+///
+/// Appends are the common case: when one list is a prefix of the other, the longer wins.
+/// When both windows appended since they last synced, the shared prefix is kept and the two
+/// tails are concatenated (the other window's turns first).
+fn merge_messages(local: &[ChatMessage], remote: &[ChatMessage]) -> Vec<ChatMessage> {
+    let prefix = local
+        .iter()
+        .zip(remote)
+        .take_while(|(left, right)| left == right)
+        .count();
+    if prefix == local.len() {
+        return remote.to_vec();
+    }
+    if prefix == remote.len() {
+        return local.to_vec();
+    }
+    let mut merged = local[..prefix].to_vec();
+    merged.extend_from_slice(&remote[prefix..]);
+    merged.extend_from_slice(&local[prefix..]);
+    merged
+}
+
 /// Put `text` on the system clipboard using the `OSC 52` escape sequence.
 ///
 /// The plugin captures the mouse, so the terminal's own select-and-copy no longer works;
@@ -2808,6 +2951,154 @@ mod tests {
             Some("hello"),
             "copying keeps the selection"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_change_from_another_window_is_pulled_in() {
+        let dir = temp_dir("sync");
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
+        session.push(ChatMessage::user("from window A"));
+        let mut app = test_app(&dir, session);
+        app.note_modified();
+
+        // Another `chat` window appends to the same file and saves it.
+        std::thread::sleep(Duration::from_millis(10));
+        let mut remote = app.store.load(&app.session.id).unwrap();
+        remote.push(ChatMessage::assistant("from window B"));
+        app.store.save(&remote).unwrap();
+
+        assert!(
+            app.pull_remote(true),
+            "the external write should be noticed"
+        );
+        assert!(
+            app.session
+                .messages
+                .iter()
+                .any(|message| message.content == "from window B"),
+            "the other window's turn should appear: {:?}",
+            app.session.messages
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_turns_from_two_windows_are_merged() {
+        let dir = temp_dir("sync-merge");
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
+        session.push(ChatMessage::user("base"));
+        let mut app = test_app(&dir, session);
+        app.note_modified();
+
+        // We append a turn locally, not saved yet.
+        app.session.push(ChatMessage::user("mine"));
+
+        // The other window appended a different turn and saved it.
+        std::thread::sleep(Duration::from_millis(10));
+        let mut remote = app.store.load(&app.session.id).unwrap();
+        remote.push(ChatMessage::user("theirs"));
+        app.store.save(&remote).unwrap();
+
+        // Saving now must keep both turns, on disk as well as in memory.
+        app.save_session_now();
+        let in_memory: Vec<&str> = app
+            .session
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect();
+        assert!(in_memory.contains(&"mine"), "{in_memory:?}");
+        assert!(in_memory.contains(&"theirs"), "{in_memory:?}");
+
+        let reloaded = app.store.load(&app.session.id).unwrap();
+        let on_disk: Vec<&str> = reloaded
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect();
+        assert!(on_disk.contains(&"mine"), "{on_disk:?}");
+        assert!(on_disk.contains(&"theirs"), "{on_disk:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleting_a_session_in_another_window_closes_it_here() {
+        let dir = temp_dir("sync-delete");
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
+        session.push(ChatMessage::user("hello"));
+        let mut app = test_app(&dir, session);
+        app.note_modified();
+        let deleted = app.session.id.clone();
+
+        // Another window removes the conversation.
+        app.store.delete(&deleted).unwrap();
+
+        assert!(app.pull_remote(true), "the deletion should be noticed");
+        assert!(app.session_closed, "the conversation should be closed here");
+        assert_ne!(
+            app.session.id, deleted,
+            "a blank conversation takes its place"
+        );
+
+        // A later save must not write the deleted conversation back.
+        app.save_session_now();
+        assert!(
+            app.store.load(&deleted).is_err(),
+            "the deleted conversation must stay deleted"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_parameter_change_from_another_window_is_pulled_in() {
+        let dir = temp_dir("sync-params");
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
+        session.push(ChatMessage::user("hello"));
+        let mut app = test_app(&dir, session);
+        app.note_modified();
+
+        // Another window switches the model and thinking level, then saves.
+        std::thread::sleep(Duration::from_millis(10));
+        let mut remote = app.store.load(&app.session.id).unwrap();
+        remote.model = "deepseek-v4-pro".to_owned();
+        remote.thinking = ThinkingEffort::Max;
+        app.store.save(&remote).unwrap();
+
+        assert!(
+            app.pull_remote(true),
+            "the parameter change should be noticed"
+        );
+        assert_eq!(app.session.model, "deepseek-v4-pro");
+        assert_eq!(app.session.thinking, ThinkingEffort::Max);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_local_parameter_change_survives_its_own_save() {
+        let dir = temp_dir("sync-params-local");
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
+        session.push(ChatMessage::user("hello"));
+        let mut app = test_app(&dir, session);
+        app.note_modified();
+
+        // The other window left a different model on disk.
+        std::thread::sleep(Duration::from_millis(10));
+        let mut remote = app.store.load(&app.session.id).unwrap();
+        remote.model = "deepseek-v4-pro".to_owned();
+        app.store.save(&remote).unwrap();
+
+        // This window keeps its own model; saving must not adopt the remote's value.
+        app.session.model = "deepseek-flash".to_owned();
+        app.save_session_now();
+        assert_eq!(app.session.model, "deepseek-flash");
+        let on_disk = app.store.load(&app.session.id).unwrap();
+        assert_eq!(on_disk.model, "deepseek-flash");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

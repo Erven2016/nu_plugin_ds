@@ -99,6 +99,14 @@ The transcript border shows the conversation's session id and the working direct
 commands run in, both in brackets (e.g. `[ab12cd34] [/home/me/project]`), so it is always
 clear which conversation is open and where `run_nu` will run.
 
+The same conversation can be open in several windows at once: each `chat` process watches
+its session file and folds in the turns another window writes, so one window's messages
+show up in the other. Concurrent turns are merged message by message (neither window loses
+a turn); a compaction or clear made elsewhere is adopted once the window is idle, and a
+conversation deleted in one window is closed in the others (it is not written back). The
+conversation's settings — model, thinking level, name and system prompt — are shared too:
+changing one here writes it out, and the other windows pick it up.
+
 ### File tools and commands
 
 The model can ask to use three tools:
