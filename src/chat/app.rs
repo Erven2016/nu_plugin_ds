@@ -344,6 +344,9 @@ pub struct ChatApp {
     /// The session file's modification time as we last read or wrote it, so a change made by
     /// another window can be told apart from our own save.
     last_modified: Option<SystemTime>,
+    /// Set once the "no stored reasoning" message has been shown for this session, so it is
+    /// not repeated every turn.
+    reasoning_warned: bool,
     /// Lines scrolled up from the bottom of the transcript.
     pub(super) scroll: usize,
     /// The largest useful `scroll`, from the last frame. Paging up at the top must not add
@@ -403,6 +406,7 @@ impl ChatApp {
             transcript_view: TranscriptView::default(),
             menu_area: None,
             last_modified: None,
+            reasoning_warned: false,
             scroll: 0,
             scroll_max: 0,
             stick_to_bottom: true,
@@ -1454,6 +1458,7 @@ impl ChatApp {
         );
         self.session_closed = false;
         self.last_modified = None;
+        self.reasoning_warned = false;
         self.refresh_sessions();
         self.scroll = 0;
         self.stick_to_bottom = true;
@@ -1470,6 +1475,7 @@ impl ChatApp {
             Ok(session) => {
                 self.session = session;
                 self.session_closed = false;
+                self.reasoning_warned = false;
                 // Track this file from now on, so a change by another window is noticed.
                 self.note_modified();
                 self.scroll = 0;
@@ -1523,6 +1529,7 @@ impl ChatApp {
         );
         self.session_closed = true;
         self.last_modified = None;
+        self.reasoning_warned = false;
         self.scroll = 0;
         self.stick_to_bottom = true;
         self.input.clear();
@@ -1688,16 +1695,20 @@ impl ChatApp {
 
     /// Build the request for the current session.
     fn build_request(&self, stream: bool, messages: &[ChatMessage]) -> ChatRequest {
+        // Tools require the thinking from every earlier assistant turn to be echoed back. When
+        // some is missing (an older session, or thinking toggled mid-conversation), thinking
+        // is turned off for this request so the tools can still be offered.
+        let thinking = self.effective_thinking();
         let request = crate::api::build_chat_request(
             &self.session.model,
-            self.session.thinking,
+            thinking,
             self.settings.max_tokens,
             self.settings.temperature,
             messages,
             stream,
         );
 
-        if self.tools_active && !self.tools_withheld && self.tools_ok() {
+        if self.tools_active && !self.tools_withheld {
             let commands = self.tools_enabled && self.context.nu_bin.is_some();
             crate::api::with_tools(request, tools::definitions(commands))
         } else {
@@ -1705,13 +1716,15 @@ impl ChatApp {
         }
     }
 
-    /// Whether the tools may be offered to the model for the current history.
-    ///
-    /// With `tools` on the wire the API requires the thinking from every earlier assistant
-    /// turn back; a history missing some (an older session, or thinking toggled mid-way)
-    /// would be rejected, so the tools are left out for that request instead.
-    fn tools_ok(&self) -> bool {
-        self.session.thinking == ThinkingEffort::Off || self.session.reasoning_complete()
+    /// The thinking level to send: the session's, unless the history is missing reasoning
+    /// that the API would demand whenever `tools` are on the wire (then thinking is skipped,
+    /// so the tools still work).
+    fn effective_thinking(&self) -> ThinkingEffort {
+        if self.session.thinking != ThinkingEffort::Off && !self.session.reasoning_complete() {
+            ThinkingEffort::Off
+        } else {
+            self.session.thinking
+        }
     }
 
     fn start_turn(&mut self) {
@@ -1855,10 +1868,14 @@ impl ChatApp {
 
     fn spawn_stream(&mut self, epoch: u64) {
         self.repair_history();
-        if self.tools_active && !self.tools_withheld && !self.tools_ok() {
+        if self.session.thinking != ThinkingEffort::Off
+            && !self.session.reasoning_complete()
+            && !self.reasoning_warned
+        {
+            self.reasoning_warned = true;
             self.set_status(
-                "tools are off this turn: an earlier answer has no stored reasoning, which \
-                 the API requires whenever tools are sent",
+                "thinking is off for this session: an earlier answer has no stored reasoning, \
+                 which the API requires when tools are sent",
                 StatusKind::Warn,
             );
         }
@@ -2729,7 +2746,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_are_left_out_when_the_history_has_no_reasoning_to_echo() {
+    fn an_incomplete_history_skips_thinking_but_keeps_the_tools() {
         let dir = temp_dir("reasoning-tools");
         let mut session = Session::new("demo", "deepseek-v4-pro", ThinkingEffort::High, None);
         session.push(ChatMessage::user("hi"));
@@ -2738,27 +2755,23 @@ mod tests {
         app.tools_enabled = true;
         app.tools_active = true;
 
-        // Thinking is on and an assistant turn has no reasoning: the tools must stay off, or
-        // the API would reject the request.
+        // Thinking is on but an assistant turn has no reasoning: thinking is dropped for the
+        // request (the API requires it back when tools are sent), but the tools remain.
         let request = app.build_request(false, &app.session.messages);
+        let json = serde_json::to_value(&request).unwrap();
         assert!(
-            serde_json::to_value(&request)
-                .unwrap()
-                .get("tools")
-                .is_none(),
-            "the tools must not be sent without the reasoning the API requires"
+            json.get("tools").is_some(),
+            "the tools should still be offered"
         );
+        assert_eq!(json["thinking"]["type"], serde_json::json!("disabled"));
 
-        // With the reasoning restored, the tools come back.
+        // With the reasoning restored, thinking is sent again.
         app.session.messages[1].reasoning_content = Some("thoughts".to_owned());
         let request = app.build_request(false, &app.session.messages);
-        assert!(
-            serde_json::to_value(&request)
-                .unwrap()
-                .get("tools")
-                .is_some(),
-            "the tools should be offered once the reasoning is there"
-        );
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(json.get("tools").is_some());
+        assert!(json.get("thinking").is_none());
+        assert_eq!(json["reasoning_effort"], serde_json::json!("high"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
