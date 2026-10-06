@@ -380,7 +380,11 @@ fn single_turn(
     session.push(ChatMessage::user(prompt.trim()));
 
     // A legacy `*-reasoner` name marks a thinking-only model, which cannot call tools.
-    let tools_active = tools_enabled && !session.model.contains("reasoner");
+    let tools_active = tools_enabled
+        && !session.model.contains("reasoner")
+        // Tools require the thinking from every earlier assistant turn to be echoed back; if
+        // the history is missing some, offering them would make the API reject the request.
+        && (session.thinking == ThinkingEffort::Off || session.reasoning_complete());
     // The command tool is only offered when a `nu` executable was found.
     let offer_commands = tools_active && context.nu_bin.is_some();
     let mut rounds = 0usize;
@@ -451,11 +455,15 @@ fn single_turn(
 
         if calls.is_empty() {
             let answer = response.text();
-            session.push(ChatMessage::assistant(answer.clone()));
+            session.push(
+                ChatMessage::assistant(answer.clone())
+                    .with_reasoning(response.reasoning().unwrap_or_default()),
+            );
             break answer;
         }
 
-        let mut assistant = ChatMessage::assistant(response.text());
+        let mut assistant = ChatMessage::assistant(response.text())
+            .with_reasoning(response.reasoning().unwrap_or_default());
         assistant.tool_calls = Some(calls.clone());
         session.push(assistant);
 

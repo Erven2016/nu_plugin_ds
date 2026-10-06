@@ -159,6 +159,23 @@ impl Session {
         open
     }
 
+    /// Whether every assistant message that would be sent carries its `reasoning_content`.
+    ///
+    /// Once a request carries `tools`, the API requires the thinking from every earlier
+    /// assistant turn to be echoed back. A session written before the plugin stored it, or
+    /// one whose thinking level was toggled mid-conversation, is missing some — and offering
+    /// tools then makes the API reject the whole request.
+    pub fn reasoning_complete(&self) -> bool {
+        self.messages.iter().all(|message| {
+            message.role != Role::Assistant
+                || message.is_empty()
+                || message
+                    .reasoning_content
+                    .as_deref()
+                    .is_some_and(|reasoning| !reasoning.is_empty())
+        })
+    }
+
     /// Everything that should be sent to the API for the next turn.
     pub fn wire_messages(&self) -> Vec<crate::api::WireMessage> {
         self.messages
@@ -875,6 +892,22 @@ mod tests {
         session.push(ChatMessage::tool("call_0", "ok"));
         assert_eq!(session.drop_orphan_tool_results(), 0);
         assert_eq!(session.messages.len(), 2);
+    }
+
+    #[test]
+    fn a_history_is_reasoning_complete_only_when_every_answer_has_it() {
+        let mut session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
+        session.push(ChatMessage::user("hi"));
+        session.push(ChatMessage::assistant("answer"));
+        assert!(!session.reasoning_complete());
+
+        session.messages[1].reasoning_content = Some("thoughts".to_owned());
+        assert!(session.reasoning_complete());
+
+        // Tool results and user turns never carry reasoning, and are not required to.
+        session.push(ChatMessage::tool("call_0", "ok"));
+        session.push(ChatMessage::user("more"));
+        assert!(session.reasoning_complete());
     }
 
     #[test]

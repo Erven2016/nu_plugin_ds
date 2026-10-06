@@ -457,6 +457,16 @@ impl ChatResponse {
             .and_then(|choice| choice.message.content.clone())
             .unwrap_or_default()
     }
+
+    /// The first choice's thinking, when the model returned any. It has to be stored and
+    /// echoed back: once a request carries `tools`, the API requires it for every assistant
+    /// turn, and rejects the request otherwise.
+    pub fn reasoning(&self) -> Option<String> {
+        self.choices
+            .first()
+            .and_then(|choice| choice.message.reasoning_content.clone())
+            .filter(|reasoning| !reasoning.is_empty())
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -601,6 +611,19 @@ pub fn truncate(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_response_exposes_its_reasoning() {
+        let raw = r#"{"model":"deepseek-v4-pro","choices":[{"message":{"role":"assistant","content":"hi","reasoning_content":"thought"},"finish_reason":"stop"}]}"#;
+        let response: ChatResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(response.text(), "hi");
+        assert_eq!(response.reasoning().as_deref(), Some("thought"));
+
+        // A response with no thinking, or an empty one, reports nothing to store.
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"hi","reasoning_content":""}}]}"#;
+        let response: ChatResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(response.reasoning(), None);
+    }
 
     #[test]
     fn usage_accumulates() {

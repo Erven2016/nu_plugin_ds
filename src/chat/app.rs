@@ -76,6 +76,9 @@ pub enum AppEvent {
         summary: String,
         removed: usize,
         usage: Option<Usage>,
+        /// Whether the turn should carry on after compacting. A manual `/compact` only
+        /// compacts; an automatic compaction is mid-turn and must continue it.
+        continue_turn: bool,
     },
     CompactFailed {
         epoch: u64,
@@ -553,7 +556,7 @@ impl ChatApp {
                         "the model rejected the history as too long; compacting and retrying",
                         StatusKind::Warn,
                     );
-                    self.force_compaction();
+                    self.force_compaction(true);
                     return;
                 }
                 self.set_status(message, StatusKind::Error);
@@ -569,12 +572,18 @@ impl ChatApp {
                 summary,
                 removed,
                 usage,
+                continue_turn,
             } => {
                 if self.current_epoch() != Some(epoch) {
                     return;
                 }
                 self.apply_compaction(summary, removed, usage);
-                self.spawn_stream(epoch);
+                if continue_turn {
+                    self.spawn_stream(epoch);
+                } else {
+                    // `/compact` compacts the history; it does not ask another question.
+                    self.stream = None;
+                }
             }
             AppEvent::CompactFailed { epoch, message } => {
                 if self.current_epoch() != Some(epoch) {
@@ -1362,7 +1371,7 @@ impl ChatApp {
             }
             "/models" => self.refresh_models(),
             "/balance" => self.refresh_balance(true),
-            "/compact" => self.force_compaction(),
+            "/compact" => self.force_compaction(false),
             "/regenerate" => self.regenerate(),
             other => self.set_status(
                 format!("unknown command `{other}`; try /help"),
@@ -1372,7 +1381,7 @@ impl ChatApp {
         true
     }
 
-    fn force_compaction(&mut self) {
+    fn force_compaction(&mut self, continue_turn: bool) {
         if self.is_busy() {
             self.set_status(
                 "cannot compact while the answer or a tool call is still running",
@@ -1382,7 +1391,7 @@ impl ChatApp {
         }
         let epoch = self.begin_epoch();
         self.stream = Some(StreamState::new(epoch, Phase::Compacting));
-        self.spawn_compaction(epoch, true);
+        self.spawn_compaction(epoch, true, continue_turn);
     }
 
     fn set_system_prompt(&mut self, prompt: &str) {
@@ -1688,12 +1697,21 @@ impl ChatApp {
             stream,
         );
 
-        if self.tools_active && !self.tools_withheld {
+        if self.tools_active && !self.tools_withheld && self.tools_ok() {
             let commands = self.tools_enabled && self.context.nu_bin.is_some();
             crate::api::with_tools(request, tools::definitions(commands))
         } else {
             request
         }
+    }
+
+    /// Whether the tools may be offered to the model for the current history.
+    ///
+    /// With `tools` on the wire the API requires the thinking from every earlier assistant
+    /// turn back; a history missing some (an older session, or thinking toggled mid-way)
+    /// would be rejected, so the tools are left out for that request instead.
+    fn tools_ok(&self) -> bool {
+        self.session.thinking == ThinkingEffort::Off || self.session.reasoning_complete()
     }
 
     fn start_turn(&mut self) {
@@ -1721,7 +1739,7 @@ impl ChatApp {
             if let Some(state) = self.stream.as_mut() {
                 state.phase = Phase::Compacting;
             }
-            self.spawn_compaction(epoch, false);
+            self.spawn_compaction(epoch, false, true);
         } else {
             self.spawn_stream(epoch);
         }
@@ -1773,7 +1791,7 @@ impl ChatApp {
         self.session.compaction_plan(keep)
     }
 
-    fn spawn_compaction(&mut self, epoch: u64, forced: bool) {
+    fn spawn_compaction(&mut self, epoch: u64, forced: bool, continue_turn: bool) {
         let plan = if forced {
             self.forced_compaction_plan()
         } else {
@@ -1802,6 +1820,7 @@ impl ChatApp {
                         summary,
                         removed,
                         usage,
+                        continue_turn,
                     });
                 }
                 Err(err) => {
@@ -1836,6 +1855,13 @@ impl ChatApp {
 
     fn spawn_stream(&mut self, epoch: u64) {
         self.repair_history();
+        if self.tools_active && !self.tools_withheld && !self.tools_ok() {
+            self.set_status(
+                "tools are off this turn: an earlier answer has no stored reasoning, which \
+                 the API requires whenever tools are sent",
+                StatusKind::Warn,
+            );
+        }
         let request = self.build_request(true, &self.session.messages);
         let client = self.client.clone();
         let tx = self.tx.clone();
@@ -2697,6 +2723,65 @@ mod tests {
                 .get("tools")
                 .is_none(),
             "the wrap-up request must not offer the tools"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tools_are_left_out_when_the_history_has_no_reasoning_to_echo() {
+        let dir = temp_dir("reasoning-tools");
+        let mut session = Session::new("demo", "deepseek-v4-pro", ThinkingEffort::High, None);
+        session.push(ChatMessage::user("hi"));
+        session.push(ChatMessage::assistant("answer")); // no reasoning stored
+        let mut app = test_app(&dir, session);
+        app.tools_enabled = true;
+        app.tools_active = true;
+
+        // Thinking is on and an assistant turn has no reasoning: the tools must stay off, or
+        // the API would reject the request.
+        let request = app.build_request(false, &app.session.messages);
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("tools")
+                .is_none(),
+            "the tools must not be sent without the reasoning the API requires"
+        );
+
+        // With the reasoning restored, the tools come back.
+        app.session.messages[1].reasoning_content = Some("thoughts".to_owned());
+        let request = app.build_request(false, &app.session.messages);
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("tools")
+                .is_some(),
+            "the tools should be offered once the reasoning is there"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_manual_compaction_does_not_start_a_new_turn() {
+        let dir = temp_dir("compact-manual");
+        let session = Session::new("demo", "deepseek-flash", ThinkingEffort::Off, None);
+        let mut app = test_app(&dir, session);
+        let epoch = app.begin_epoch();
+        app.stream = Some(StreamState::new(epoch, Phase::Compacting));
+
+        app.handle(AppEvent::Compacted {
+            epoch,
+            summary: "SUM".to_owned(),
+            removed: 0,
+            usage: None,
+            continue_turn: false,
+        });
+
+        assert!(
+            app.stream.is_none(),
+            "/compact should compact without asking another question"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
